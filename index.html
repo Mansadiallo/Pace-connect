@@ -775,6 +775,12 @@ class PaceQuery {
   update(obj) { this.method = "PATCH"; this.body = obj; return this; }
   upsert(obj, opts) { this.method = "POST"; this.body = obj; this._upsert = true; this._onConflict = opts && opts.onConflict; return this; }
   delete() { this.method = "DELETE"; return this; }
+  // Désactive le renvoi de la ligne affectée (Prefer: return=minimal au lieu de representation).
+  // Indispensable quand l'appelant n'a pas de droit de LECTURE sur la table (ex. inscription
+  // publique sur une table dont le SELECT est réservé aux admins) : demander la représentation
+  // dans ce cas fait échouer l'écriture elle-même avec une erreur RLS, alors que l'écriture
+  // seule (sans relecture) est parfaitement autorisée.
+  returning(actif) { this._noReturn = actif === false; return this; }
   single() { this._single = true; return this; }
   maybeSingle() { this._single = true; this._maybe = true; return this; }
   then(resolve, reject) { return this._exec().then(resolve, reject); }
@@ -788,7 +794,9 @@ class PaceQuery {
     if (qs) url += "?" + qs;
 
     const headers = restHeaders({ "Content-Type": "application/json" });
-    if (this.method === "POST" || this.method === "PATCH") {
+    if (this._noReturn && (this.method === "POST" || this.method === "PATCH" || this.method === "DELETE")) {
+      headers["Prefer"] = (this._upsert && this._onConflict ? "resolution=merge-duplicates," : "") + "return=minimal";
+    } else if (this.method === "POST" || this.method === "PATCH") {
       headers["Prefer"] = (this._upsert ? "resolution=merge-duplicates," : "") + "return=representation";
     } else if (this.method === "DELETE") {
       headers["Prefer"] = "return=representation";
@@ -3777,10 +3785,10 @@ function VolunteerCard({ lang, benevoleStatut, onInscrit }) {
     if (indicatif && contactFinal && !contactFinal.includes("@") && !contactFinal.startsWith("+")) {
       contactFinal = `${indicatif} ${contactFinal}`;
     }
-    const { error } = await supabase.from("benevoles").insert({ nom, contact: contactFinal, pays: pays || null, ville: ville || null, zone, device_id: DEVICE_ID, statut: "en_attente" });
+    const { error } = await supabase.from("benevoles").insert({ nom, contact: contactFinal, pays: pays || null, ville: ville || null, zone, device_id: DEVICE_ID, statut: "en_attente" }).returning(false);
     setBusy(false);
     if (!error) { setDone(true); setNom(""); setContact(""); setPays(""); setVille(""); setZone(""); if (onInscrit) onInscrit(); }
-    else alert(t(lang, "inscription_echec"));
+    else alert(t(lang, "inscription_echec") + (error && error.message ? "\n(" + error.message + ")" : ""));
   }
 
   // Cet appareil a déjà une inscription (peu importe son statut) : on ne montre jamais le
