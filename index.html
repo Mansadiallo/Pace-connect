@@ -1883,17 +1883,22 @@ function Accueil({ signalements, arbres, notifState, onEnableNotif, onOpenAdmin,
           const cat = categorieMeta(s.categorie);
           const IconC = cat.icon;
           return (
-            <div key={s.id} style={{ display: "flex", gap: 10, alignItems: "center", background: "var(--c-surface)", padding: 10, borderRadius: 12, border: "1px solid var(--c-border)" }}>
-              <div style={{ background: "var(--c-surface-soft)", borderRadius: 10, padding: 8 }}><IconC size={16} color="var(--c-accent)" /></div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--c-text)" }}>{categorieLabel(lang, cat.id)}</div>
-                <div style={{ fontSize: 11.5, color: "var(--c-text-muted)" }}>{s.date}</div>
+            <div key={s.id} style={{ background: "var(--c-surface)", padding: 10, borderRadius: 12, border: "1px solid var(--c-border)" }}>
+              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                <div style={{ background: "var(--c-surface-soft)", borderRadius: 10, padding: 8 }}><IconC size={16} color="var(--c-accent)" /></div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--c-text)" }}>{categorieLabel(lang, cat.id)}</div>
+                  <div style={{ fontSize: 11.5, color: "var(--c-text-muted)" }}>{s.date}</div>
+                </div>
+                <span style={{
+                  fontSize: 10.5, fontWeight: 600, padding: "3px 8px", borderRadius: 20,
+                  background: s.statut === "resolu" ? "var(--c-success-bg)" : "var(--c-warning-bg)", color: s.statut === "resolu" ? "var(--c-accent)" : "#B5451B" }}>
+                  {s.statut === "resolu" ? t(lang, "resolu") : t(lang, "en_attente")}
+                </span>
               </div>
-              <span style={{
-                fontSize: 10.5, fontWeight: 600, padding: "3px 8px", borderRadius: 20,
-                background: s.statut === "resolu" ? "var(--c-success-bg)" : "var(--c-warning-bg)", color: s.statut === "resolu" ? "var(--c-accent)" : "#B5451B" }}>
-                {s.statut === "resolu" ? t(lang, "resolu") : t(lang, "en_attente")}
-              </span>
+              <div style={{ marginTop: 8, paddingLeft: 42 }}>
+                <FicheEnvironnementale code={s.categorie} />
+              </div>
             </div>
           );
         })}
@@ -4282,7 +4287,7 @@ const ORGANISME_OPTIONS = [
 ];
 const ORGANISME_LABELS = Object.fromEntries(ORGANISME_OPTIONS.map(o => [o.id, o.label]));
 
-function AdminSpace({ signalements, arbres, onUpdateStatut, onResolve, onValidate, onValidateArbre, onDelete, onSoftDeleteArbre, onRevertModeration, onSoftDeleteSignalement, onRestaurerItem, onExit }) {
+function AdminSpace({ signalements, arbres, onUpdateStatut, onResolve, onValidate, onValidateArbre, onDelete, onSoftDeleteArbre, onRevertModeration, onSoftDeleteSignalement, onRestaurerItem, onRafraichir, rafraichissementEnCours, onExit }) {
   const [session, setSession] = useState(null);
   const [isAdmin, setIsAdmin] = useState(null); // null = en cours de vérification
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
@@ -4656,6 +4661,13 @@ function AdminSpace({ signalements, arbres, onUpdateStatut, onResolve, onValidat
 
       {panel === "signalements" && (
         <>
+          <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
+            <button onClick={onRafraichir} disabled={rafraichissementEnCours} style={{
+              display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 20, fontSize: 11.5, fontWeight: 600,
+              border: "1px solid var(--c-border)", background: "var(--c-surface)", color: "var(--c-text-secondary)", cursor: rafraichissementEnCours ? "default" : "pointer" }}>
+              <IconClock size={13} /> {rafraichissementEnCours ? "Actualisation…" : "Actualiser"}
+            </button>
+          </div>
           <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
             {[["attente", "En attente"], ["resolu", "Résolus"], ["tous", "Tous"]].map(([id, label]) => (
               <button key={id} onClick={() => setFilter(id)} style={{
@@ -6230,12 +6242,32 @@ function App() {
   // La lecture passe par la vue benevoles_statut_public (device_id + statut uniquement, aucune
   // donnée personnelle) plutôt que par la table benevoles directement, dont le SELECT public
   // n'existe plus depuis la correction de la fuite de vie privée.
-  const [benevoleStatut, setBenevoleStatut] = useState(null);
-  const [benevoleStatutChargement, setBenevoleStatutChargement] = useState(true);
+  const [benevoleStatut, setBenevoleStatut] = useState(() => {
+    try { return localStorage.getItem("pace-benevole-statut") || null; } catch (e) { return null; }
+  });
+  // Si un statut est déjà en cache local, l'accès est accordé immédiatement (pas d'attente
+  // réseau) : un bénévole déjà validé garde son accès même hors ligne ou après une perte de
+  // connexion. La vérification serveur tourne quand même en tâche de fond pour détecter un
+  // changement de statut (suspension, etc.) dès que la connexion est disponible.
+  const [benevoleStatutChargement, setBenevoleStatutChargement] = useState(() => {
+    try { return !localStorage.getItem("pace-benevole-statut"); } catch (e) { return true; }
+  });
   useEffect(() => {
     supabase.from("benevoles_statut_public").select("statut").eq("device_id", DEVICE_ID).order("statut", { ascending: false }).limit(1)
       .then(({ data }) => {
-        if (data && data[0]) setBenevoleStatut(data[0].statut || "valide");
+        if (data && data.length > 0) {
+          // Réponse serveur claire : statut à jour, on le met en cache.
+          const s = data[0].statut || "valide";
+          setBenevoleStatut(s);
+          try { localStorage.setItem("pace-benevole-statut", s); } catch (e) {}
+        } else if (data) {
+          // Réponse serveur claire mais vide : vraiment aucune inscription pour cet appareil
+          // (pas une panne réseau, data est un tableau, pas null) — on efface le cache.
+          setBenevoleStatut(null);
+          try { localStorage.removeItem("pace-benevole-statut"); } catch (e) {}
+        }
+        // data === null : échec réseau. On ne touche pas au statut, on garde la valeur déjà
+        // en cache (accès déjà validé précédemment) plutôt que de bloquer l'accès à tort.
         setBenevoleStatutChargement(false);
       });
   }, []);
@@ -6453,34 +6485,37 @@ function App() {
     return { ...r, date: new Date(r.planted_at).toLocaleDateString("fr-FR"), plantedAt: new Date(r.planted_at).getTime() };
   }
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const [{ data: sigs }, { data: trees }, { data: news }, { data: obs }, { data: suiv }] = await Promise.all([
-          supabase.from("signalements").select("*").eq("is_deleted", false).order("created_at", { ascending: false }).limit(300),
-          supabase.from("arbres").select("*").eq("is_deleted", false).order("created_at", { ascending: false }).limit(300),
-          supabase.from("actualites").select("*").order("created_at", { ascending: false }).limit(20),
-          supabase.from("observations").select("*").order("created_at", { ascending: false }).limit(200),
-          supabase.from("arbre_suivis").select("*").order("created_at", { ascending: false }).limit(1000),
-        ]);
-        setSignalements((sigs || []).reverse().map(mapSignalement));
-        setArbres((trees || []).reverse().map(mapArbre));
-        setActualites(news || []);
-        setObservations((obs || []).reverse());
-        setSuivis(suiv || []);
+  const [rafraichissementEnCours, setRafraichissementEnCours] = useState(false);
+  async function chargerDonneesPrincipales() {
+    setRafraichissementEnCours(true);
+    try {
+      const [{ data: sigs }, { data: trees }, { data: news }, { data: obs }, { data: suiv }] = await Promise.all([
+        supabase.from("signalements").select("*").eq("is_deleted", false).order("created_at", { ascending: false }).limit(300),
+        supabase.from("arbres").select("*").eq("is_deleted", false).order("created_at", { ascending: false }).limit(300),
+        supabase.from("actualites").select("*").order("created_at", { ascending: false }).limit(20),
+        supabase.from("observations").select("*").order("created_at", { ascending: false }).limit(200),
+        supabase.from("arbre_suivis").select("*").order("created_at", { ascending: false }).limit(1000),
+      ]);
+      setSignalements((sigs || []).reverse().map(mapSignalement));
+      setArbres((trees || []).reverse().map(mapArbre));
+      setActualites(news || []);
+      setObservations((obs || []).reverse());
+      setSuivis(suiv || []);
 
-        const lastSeen = localStorage.getItem("pace-last-alert") || "";
-        const newAlert = (news || []).find(n => n.urgent && n.created_at > lastSeen);
-        if (newAlert && typeof Notification !== "undefined" && Notification.permission === "granted") {
-          try { new Notification("Alerte PACE — " + newAlert.titre, { body: newAlert.contenu, icon: "./icon-192.png" }); } catch (e) {}
-        }
-        if (news && news[0]) localStorage.setItem("pace-last-alert", news[0].created_at);
-      } catch (e) {
-        console.error("Erreur de chargement Supabase :", e);
+      const lastSeen = localStorage.getItem("pace-last-alert") || "";
+      const newAlert = (news || []).find(n => n.urgent && n.created_at > lastSeen);
+      if (newAlert && typeof Notification !== "undefined" && Notification.permission === "granted") {
+        try { new Notification("Alerte PACE — " + newAlert.titre, { body: newAlert.contenu, icon: "./icon-192.png" }); } catch (e) {}
       }
-      setLoaded(true);
-    })();
-  }, []);
+      if (news && news[0]) localStorage.setItem("pace-last-alert", news[0].created_at);
+    } catch (e) {
+      console.error("Erreur de chargement Supabase :", e);
+    }
+    setLoaded(true);
+    setRafraichissementEnCours(false);
+  }
+
+  useEffect(() => { chargerDonneesPrincipales(); }, []);
 
   async function uploadPhoto(dataUrl, prefix) {
     if (!dataUrl) return null;
@@ -6722,7 +6757,7 @@ function App() {
         )}
 
         {showAdmin ? (
-          <AdminSpace signalements={signalements} arbres={arbres} onUpdateStatut={adminUpdateStatut} onResolve={adminResolve} onValidate={adminValidate} onValidateArbre={adminValidateArbre} onDelete={adminDelete} onSoftDeleteArbre={adminSoftDeleteArbre} onRevertModeration={adminRevertModeration} onSoftDeleteSignalement={adminSoftDeleteSignalement} onRestaurerItem={onRestaurerItem} onExit={() => setShowAdmin(false)} />
+          <AdminSpace signalements={signalements} arbres={arbres} onUpdateStatut={adminUpdateStatut} onResolve={adminResolve} onValidate={adminValidate} onValidateArbre={adminValidateArbre} onDelete={adminDelete} onSoftDeleteArbre={adminSoftDeleteArbre} onRevertModeration={adminRevertModeration} onSoftDeleteSignalement={adminSoftDeleteSignalement} onRestaurerItem={onRestaurerItem} onRafraichir={chargerDonneesPrincipales} rafraichissementEnCours={rafraichissementEnCours} onExit={() => setShowAdmin(false)} />
         ) : accesBloque ? (
           <BenevoleAccesBloque statut={benevoleStatut} />
         ) : ecransReserves.includes(tab) && statutEnCours ? (
@@ -6737,7 +6772,7 @@ function App() {
           <AssistantIA onBack={() => setTab("accueil")} signalements={signalements} arbres={arbres} observations={observations} actualites={actualites} />
         ) : (
           <div key={tab} className="pace-fade-in">
-            {tab === "accueil" && <Accueil signalements={signalements.filter(s => s.device_id === DEVICE_ID)} arbres={arbres.filter(a => a.device_id === DEVICE_ID)} notifState={notifState} onEnableNotif={enableNotif} onOpenAdmin={() => setShowAdmin(true)} actualites={actualites} onNavigate={setTab} lang={lang} estBenevoleValide={estBenevoleValide} benevoleStatut={benevoleStatut} onBenevoleInscrit={() => setBenevoleStatut("en_attente")} />}
+            {tab === "accueil" && <Accueil signalements={signalements.filter(s => s.device_id === DEVICE_ID)} arbres={arbres.filter(a => a.device_id === DEVICE_ID)} notifState={notifState} onEnableNotif={enableNotif} onOpenAdmin={() => setShowAdmin(true)} actualites={actualites} onNavigate={setTab} lang={lang} estBenevoleValide={estBenevoleValide} benevoleStatut={benevoleStatut} onBenevoleInscrit={() => { setBenevoleStatut("en_attente"); try { localStorage.setItem("pace-benevole-statut", "en_attente"); } catch (e) {} }} />}
             {tab === "carte" && estBenevoleValide && <Carte signalements={signalements} arbres={arbres} observations={observations} onAddSignalement={addSignalement} onAddArbre={addArbre} onAddObservation={addObservation} online={online} pendingQueueCount={pendingQueueCount} onFlushQueue={flushPendingQueue} lang={lang} coordFormat={coordFormat} />}
             {tab === "signaler" && estBenevoleValide && <Signaler onSubmit={addSignalement} lang={lang} />}
             {tab === "arbre" && estBenevoleValide && <MonArbre arbres={arbres.filter(a => a.device_id === DEVICE_ID)} suivis={suivis} onAdd={addArbre} onAddSuivi={addSuivi} lang={lang} coordFormat={coordFormat} />}
