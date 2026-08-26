@@ -752,7 +752,11 @@ class PaceQuery {
     this._countMode = null;
     this._upsert = false;
     this._onConflict = null;
+    this._extraHeaders = null;
   }
+  // Permet d'ajouter des en-têtes HTTP personnalisés à une requête précise (ex. "x-device-id"
+  // pour prouver, côté RLS, quel appareil est à l'origine d'une mise à jour en libre-service).
+  headers(obj) { this._extraHeaders = Object.assign(this._extraHeaders || {}, obj); return this; }
   select(cols, opts) {
     if (cols) this.params.set("select", cols);
     if (opts && opts.head) this._head = true;
@@ -793,7 +797,7 @@ class PaceQuery {
     const qs = this.params.toString();
     if (qs) url += "?" + qs;
 
-    const headers = restHeaders({ "Content-Type": "application/json" });
+    const headers = restHeaders(Object.assign({ "Content-Type": "application/json" }, this._extraHeaders || {}));
     if (this._noReturn && (this.method === "POST" || this.method === "PATCH" || this.method === "DELETE")) {
       headers["Prefer"] = (this._upsert && this._onConflict ? "resolution=merge-duplicates," : "") + "return=minimal";
     } else if (this.method === "POST" || this.method === "PATCH") {
@@ -994,6 +998,7 @@ const TRANSLATIONS = {
     actualites: "Actualités", signalements_resolus: "Signalements résolus",
     activite_recente: "Activité récente", rien_signaler: "Rien à signaler pour l'instant. Fais ton premier signalement ou plante ton premier arbre.",
     resolu: "Résolu", en_attente: "En attente", traite_par: "✓ Traité par",
+    marquer_resolu_signaleur: "Marquer comme résolu", remettre_en_attente_signaleur: "Remettre en attente",
     centre_controle: "Centre de contrôle PACE", apropos_confidentialite: "À propos & Confidentialité",
     devenir_benevole: "Devenir bénévole", inscription_recue: "Inscription reçue ! Ton accès sera activé après validation par un administrateur.",
     rejoindre_equipe: "Rejoins l'équipe locale PACE et participe aux campagnes de terrain.", sinscrire: "S'inscrire",
@@ -1096,6 +1101,7 @@ const TRANSLATIONS = {
     actualites: "News", signalements_resolus: "Resolved reports",
     activite_recente: "Recent activity", rien_signaler: "Nothing to report yet. Make your first report or plant your first tree.",
     resolu: "Resolved", en_attente: "Pending", traite_par: "✓ Handled by",
+    marquer_resolu_signaleur: "Mark as resolved", remettre_en_attente_signaleur: "Reopen",
     centre_controle: "PACE Control Center", apropos_confidentialite: "About & Privacy",
     devenir_benevole: "Become a volunteer", inscription_recue: "Registration received! Your access will be activated once an administrator approves it.",
     rejoindre_equipe: "Join the local PACE team and take part in field campaigns.", sinscrire: "Sign up",
@@ -1783,7 +1789,7 @@ function ClimatWidget({ lang }) {
   );
 }
 
-function Accueil({ signalements, arbres, notifState, onEnableNotif, onOpenAdmin, actualites, onNavigate, lang, estBenevoleValide, benevoleStatut, onBenevoleInscrit, estOrganisationValidee, organisationStatut }) {
+function Accueil({ signalements, arbres, notifState, onEnableNotif, onOpenAdmin, actualites, onNavigate, lang, estBenevoleValide, benevoleStatut, onBenevoleInscrit, estOrganisationValidee, organisationStatut, onBasculerStatutSignalement }) {
   const resolus = signalements.filter(s => s.statut === "resolu").length;
   const co2 = arbres.reduce((sum, a) => sum + co2EstimeParArbre(a), 0);
   const accesEtendu = estBenevoleValide || estOrganisationValidee; // bénévole validé OU organisation validée
@@ -1915,6 +1921,17 @@ function Accueil({ signalements, arbres, notifState, onEnableNotif, onOpenAdmin,
               <div style={{ marginTop: 8, paddingLeft: 42 }}>
                 <FicheEnvironnementale code={s.categorie} />
               </div>
+              {onBasculerStatutSignalement && (
+                <div style={{ marginTop: 8, paddingLeft: 42 }}>
+                  <button onClick={() => onBasculerStatutSignalement(s)} style={{
+                    fontSize: 11, fontWeight: 600, padding: "6px 12px", borderRadius: 8, cursor: "pointer",
+                    border: s.statut === "resolu" ? "1px solid var(--c-border)" : "none",
+                    background: s.statut === "resolu" ? "var(--c-surface)" : "var(--c-accent-dark)",
+                    color: s.statut === "resolu" ? "var(--c-text-secondary)" : "#fff" }}>
+                    {s.statut === "resolu" ? t(lang, "remettre_en_attente_signaleur") : t(lang, "marquer_resolu_signaleur")}
+                  </button>
+                </div>
+              )}
             </div>
           );
         })}
@@ -6818,6 +6835,28 @@ function App() {
     }
   }
 
+  // Le bénévole/citoyen à l'origine d'un signalement est sur le terrain et sait en temps réel
+  // si le problème a été traité ou non : il peut donc basculer lui-même le statut de SES PROPRES
+  // signalements (identifiés par device_id), sans passer par l'admin.
+  // Défense en profondeur : la vérification device_id ci-dessous est côté client uniquement.
+  // Une politique RLS côté serveur (table "signalements") doit exister pour n'autoriser la
+  // mise à jour de la colonne "statut" que lorsque device_id = auteur — sinon n'importe quel
+  // appareil pourrait, en théorie, rejouer la requête pour un signalement qui n'est pas le sien.
+  async function citoyenBasculerStatutSignalement(signalement) {
+    if (!signalement || signalement.device_id !== DEVICE_ID) return;
+    const next = signalement.statut === "resolu" ? "attente" : "resolu";
+    const clear = next === "resolu" ? { resolved_at: new Date().toISOString() } : { resolution_organisme: null, resolution_action: null, resolved_at: null };
+    const precedent = signalement;
+    setSignalements(prev => prev.map(s => s.id === signalement.id ? { ...s, statut: next, ...clear } : s));
+    const { data, error } = await supabase.from("signalements").update({ statut: next, ...clear }).eq("id", signalement.id).headers({ "x-device-id": DEVICE_ID }).select();
+    if (error || !data || data.length === 0) {
+      setSignalements(prev => prev.map(s => s.id === signalement.id ? precedent : s));
+      alert("Action refusée par le serveur. Réessaie une fois de retour en ligne, ou contacte un administrateur si le problème persiste.");
+      return;
+    }
+    logActivity(next === "resolu" ? "resolution_signaleur" : "reouverture_signaleur", "signalements", signalement.id);
+  }
+
   async function adminResolve(signalement, { organisme, action }) {
     const payload = { statut: "resolu", resolution_organisme: organisme, resolution_action: action, resolved_at: new Date().toISOString() };
     const { data, error } = await supabase.from("signalements").update(payload).eq("id", signalement.id).select();
@@ -7196,7 +7235,7 @@ function App() {
           <EspaceOrganisation organisationEmail={citoyenSession && citoyenSession.user && citoyenSession.user.email} onBack={() => setTab("accueil")} />
         ) : (
           <div key={tab} className="pace-fade-in">
-            {tab === "accueil" && <Accueil signalements={signalements.filter(s => s.device_id === DEVICE_ID)} arbres={arbres.filter(a => a.device_id === DEVICE_ID)} notifState={notifState} onEnableNotif={enableNotif} onOpenAdmin={() => setShowAdmin(true)} actualites={actualites} onNavigate={setTab} lang={lang} estBenevoleValide={estBenevoleValide} benevoleStatut={benevoleStatut} onBenevoleInscrit={() => { setBenevoleStatut("en_attente"); try { localStorage.setItem("pace-benevole-statut", "en_attente"); } catch (e) {} }} estOrganisationValidee={estOrganisationValidee} organisationStatut={organisationStatut} />}
+            {tab === "accueil" && <Accueil signalements={signalements.filter(s => s.device_id === DEVICE_ID)} arbres={arbres.filter(a => a.device_id === DEVICE_ID)} notifState={notifState} onEnableNotif={enableNotif} onOpenAdmin={() => setShowAdmin(true)} actualites={actualites} onNavigate={setTab} lang={lang} estBenevoleValide={estBenevoleValide} benevoleStatut={benevoleStatut} onBenevoleInscrit={() => { setBenevoleStatut("en_attente"); try { localStorage.setItem("pace-benevole-statut", "en_attente"); } catch (e) {} }} estOrganisationValidee={estOrganisationValidee} organisationStatut={organisationStatut} onBasculerStatutSignalement={citoyenBasculerStatutSignalement} />}
             {tab === "carte" && accesEtendu && <Carte signalements={signalements} arbres={arbres} observations={observations} onAddSignalement={addSignalement} onAddArbre={addArbre} onAddObservation={addObservation} online={online} pendingQueueCount={pendingQueueCount} onFlushQueue={flushPendingQueue} lang={lang} coordFormat={coordFormat} />}
             {tab === "signaler" && accesEtendu && <Signaler onSubmit={addSignalement} lang={lang} />}
             {tab === "arbre" && accesEtendu && <MonArbre arbres={arbres.filter(a => a.device_id === DEVICE_ID)} suivis={suivis} onAdd={addArbre} onAddSuivi={addSuivi} lang={lang} coordFormat={coordFormat} />}
