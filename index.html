@@ -1783,9 +1783,10 @@ function ClimatWidget({ lang }) {
   );
 }
 
-function Accueil({ signalements, arbres, notifState, onEnableNotif, onOpenAdmin, actualites, onNavigate, lang, estBenevoleValide, benevoleStatut, onBenevoleInscrit }) {
+function Accueil({ signalements, arbres, notifState, onEnableNotif, onOpenAdmin, actualites, onNavigate, lang, estBenevoleValide, benevoleStatut, onBenevoleInscrit, estOrganisationValidee, organisationStatut }) {
   const resolus = signalements.filter(s => s.statut === "resolu").length;
   const co2 = arbres.reduce((sum, a) => sum + co2EstimeParArbre(a), 0);
+  const accesEtendu = estBenevoleValide || estOrganisationValidee; // bénévole validé OU organisation validée
   return (
     <Screen>
       <SectionTitle sub={t(lang, "sub_accueil")}>{t(lang, "title_accueil")}</SectionTitle>
@@ -1802,45 +1803,59 @@ function Accueil({ signalements, arbres, notifState, onEnableNotif, onOpenAdmin,
 
       <ClimatWidget lang={lang} />
 
-      {!estBenevoleValide && (
+      {!accesEtendu && (
         <div style={{ background: "linear-gradient(120deg,var(--c-accent-dark),var(--c-accent))", borderRadius: 14, padding: "14px 16px", marginBottom: 4, color: "#fff" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
             <IconShield size={16} color="#fff" />
-            <div style={{ fontSize: 13.5, fontWeight: 700 }}>Accès complet réservé aux bénévoles</div>
+            <div style={{ fontSize: 13.5, fontWeight: 700 }}>Accès complet réservé aux bénévoles et organisations</div>
           </div>
           <div style={{ fontSize: 12, opacity: 0.92, lineHeight: 1.5 }}>
-            Carte, signalements, arbres et biodiversité sont réservés aux bénévoles validés par PACE.
+            Carte, signalements, arbres et biodiversité sont réservés aux bénévoles et organisations validés par PACE.
             Inscris-toi ci-dessous pour y accéder.
           </div>
         </div>
       )}
-      {!estBenevoleValide && <VolunteerCard lang={lang} benevoleStatut={benevoleStatut} onInscrit={onBenevoleInscrit} />}
+      {!accesEtendu && <VolunteerCard lang={lang} benevoleStatut={benevoleStatut} onInscrit={onBenevoleInscrit} />}
+      {!accesEtendu && <OrganisationCard lang={lang} organisationStatut={organisationStatut} />}
 
-      <button onClick={() => estBenevoleValide && onNavigate("assistant")} disabled={!estBenevoleValide} style={{
+      {estOrganisationValidee && (
+        <button onClick={() => onNavigate("espace_org")} style={{
+          display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left",
+          background: "linear-gradient(120deg,var(--c-accent-dark),var(--c-accent))", border: "none", borderRadius: 14, padding: "13px 14px",
+          marginBottom: 16, marginTop: 4, cursor: "pointer", color: "#fff" }}>
+          <div style={{ background: "rgba(255,255,255,0.18)", borderRadius: 10, padding: 8 }}><IconShield size={17} color="#fff" /></div>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>Espace Organisation</div>
+            <div style={{ fontSize: 11, opacity: 0.85 }}>Modération de votre domaine, rapports, actualités officielles</div>
+          </div>
+        </button>
+      )}
+
+      <button onClick={() => accesEtendu && onNavigate("assistant")} disabled={!accesEtendu} style={{
         display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left",
-        background: estBenevoleValide ? "linear-gradient(120deg,var(--c-accent-dark),var(--c-accent))" : "var(--c-surface-soft)",
-        border: estBenevoleValide ? "none" : "1px dashed var(--c-border)", borderRadius: 14, padding: "13px 14px",
-        marginBottom: 16, cursor: estBenevoleValide ? "pointer" : "default", color: estBenevoleValide ? "#fff" : "var(--c-text-muted)"
+        background: accesEtendu ? "linear-gradient(120deg,var(--c-accent-dark),var(--c-accent))" : "var(--c-surface-soft)",
+        border: accesEtendu ? "none" : "1px dashed var(--c-border)", borderRadius: 14, padding: "13px 14px",
+        marginBottom: 16, cursor: accesEtendu ? "pointer" : "default", color: accesEtendu ? "#fff" : "var(--c-text-muted)"
       }}>
-        <div style={{ background: estBenevoleValide ? "rgba(255,255,255,0.18)" : "var(--c-surface)", borderRadius: 10, padding: 8 }}>
-          {estBenevoleValide ? <IconSparkles size={17} color="#fff" /> : <IconLock size={17} />}
+        <div style={{ background: accesEtendu ? "rgba(255,255,255,0.18)" : "var(--c-surface)", borderRadius: 10, padding: 8 }}>
+          {accesEtendu ? <IconSparkles size={17} color="#fff" /> : <IconLock size={17} />}
         </div>
         <div>
           <div style={{ fontSize: 13, fontWeight: 600 }}>{t(lang, "assistant_titre")}</div>
-          <div style={{ fontSize: 11, opacity: 0.85 }}>{estBenevoleValide ? t(lang, "assistant_sub") : "Réservé aux bénévoles validés"}</div>
+          <div style={{ fontSize: 11, opacity: 0.85 }}>{accesEtendu ? t(lang, "assistant_sub") : "Réservé aux bénévoles et organisations validés"}</div>
         </div>
       </button>
 
       <div style={{ marginBottom: 18 }}>
-        <button onClick={() => estBenevoleValide && onNavigate("biodiversite")} disabled={!estBenevoleValide} style={{
+        <button onClick={() => accesEtendu && onNavigate("biodiversite")} disabled={!accesEtendu} style={{
           display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8, padding: 14, borderRadius: 14,
-          border: "1px solid var(--c-border)", background: "var(--c-surface)", cursor: estBenevoleValide ? "pointer" : "default", textAlign: "left", width: "100%",
-          opacity: estBenevoleValide ? 1 : 0.6 }}>
+          border: "1px solid var(--c-border)", background: "var(--c-surface)", cursor: accesEtendu ? "pointer" : "default", textAlign: "left", width: "100%",
+          opacity: accesEtendu ? 1 : 0.6 }}>
           <div style={{ background: "var(--c-surface-soft)", borderRadius: 10, padding: 8 }}>
-            {estBenevoleValide ? <IconPaw size={18} color="var(--c-accent)" /> : <IconLock size={18} color="var(--c-text-muted)" />}
+            {accesEtendu ? <IconPaw size={18} color="var(--c-accent)" /> : <IconLock size={18} color="var(--c-text-muted)" />}
           </div>
           <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--c-text)" }}>{t(lang, "title_biodiversite")}</div>
-          {!estBenevoleValide && <div style={{ fontSize: 10.5, color: "var(--c-text-muted)" }}>Réservé aux bénévoles validés</div>}
+          {!accesEtendu && <div style={{ fontSize: 10.5, color: "var(--c-text-muted)" }}>Réservé aux bénévoles et organisations validés</div>}
         </button>
       </div>
 
@@ -1856,6 +1871,7 @@ function Accueil({ signalements, arbres, notifState, onEnableNotif, onOpenAdmin,
                 background: n.urgent ? "var(--c-warning-bg)" : "var(--c-surface)", border: `1px solid ${n.urgent ? "var(--c-warning-border-soft)" : "var(--c-border)"}`,
                 borderRadius: 12, padding: 12 }}>
                 {n.urgent && <div style={{ fontSize: 10, fontWeight: 700, color: "#B5451B", marginBottom: 3 }}>⚠ ALERTE</div>}
+                {n.auteur_nom && <div style={{ fontSize: 10, fontWeight: 700, color: "var(--c-accent-dark)", marginBottom: 3, display: "flex", alignItems: "center", gap: 4 }}><IconShield size={10} /> {n.auteur_nom}</div>}
                 <div style={{ fontWeight: 600, fontSize: 13, color: "var(--c-text)" }}>{n.titre}</div>
                 <div style={{ fontSize: 12, color: "var(--c-text-secondary)", marginTop: 3 }}>{n.contenu}</div>
                 <div style={{ fontSize: 10.5, color: "var(--c-text-muted)", marginTop: 5 }}>{new Date(n.created_at).toLocaleDateString("fr-FR")}</div>
@@ -3860,6 +3876,181 @@ function VolunteerCard({ lang, benevoleStatut, onInscrit }) {
   );
 }
 
+const ORGANISATION_STATUT_INFO = {
+  en_attente: { label: "Inscription envoyée", texte: "Ta demande de compte Organisation a été reçue et est en attente de validation par l'équipe PACE.", couleur: "var(--c-warning)" },
+  valide: { label: "Organisation validée", texte: "Ton compte est validé. Tu as accès aux fonctionnalités PACE Connect ainsi qu'aux outils de ton organisation.", couleur: "var(--c-accent)" },
+  suspendu: { label: "Compte suspendu", texte: "Le compte de ton organisation a été suspendu par l'équipe PACE. Contacte l'équipe pour plus d'informations.", couleur: "#B5451B" },
+  rejete: { label: "Inscription refusée", texte: "Cette demande n'a pas été retenue par l'équipe PACE. Contacte l'équipe si tu penses qu'il s'agit d'une erreur.", couleur: "var(--c-text-muted)" },
+};
+
+function OrganisationCard({ lang, organisationStatut }) {
+  const [mode, setMode] = useState("choix"); // choix | inscription | connexion
+  const [type, setType] = useState("ong");
+  const [nom, setNom] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [pays, setPays] = useState("");
+  const [ville, setVille] = useState("");
+  const [description, setDescription] = useState("");
+  const [numeroEnregistrement, setNumeroEnregistrement] = useState("");
+  const [defisChoisis, setDefisChoisis] = useState([]);
+  const [defisDisponibles, setDefisDisponibles] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [erreur, setErreur] = useState("");
+  const [done, setDone] = useState(false);
+
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginErreur, setLoginErreur] = useState("");
+  const [loginBusy, setLoginBusy] = useState(false);
+
+  useEffect(() => {
+    supabase.from("env_defis").select("id, nom").eq("statut", "publie").order("ordre", { ascending: true })
+      .then(({ data }) => setDefisDisponibles(data || []));
+  }, []);
+
+  function toggleDefi(id) {
+    setDefisChoisis(prev => prev.includes(id) ? prev.filter(d => d !== id) : [...prev, id]);
+  }
+
+  async function inscrire(e) {
+    if (e && e.preventDefault) e.preventDefault();
+    setErreur("");
+    if (!nom.trim()) { setErreur("Le nom de l'organisation est requis."); return; }
+    if (!email.trim() || !email.includes("@")) { setErreur("Adresse e-mail invalide."); return; }
+    if (!password || password.length < 8) { setErreur("Le mot de passe doit contenir au moins 8 caractères."); return; }
+    if (password !== confirmPassword) { setErreur("Les deux mots de passe ne correspondent pas."); return; }
+    if (defisChoisis.length === 0) { setErreur("Choisis au moins un défi environnemental."); return; }
+
+    setBusy(true);
+    const { error: errSignUp } = await supabase.auth.signUp({
+      email: email.trim(), password,
+      options: { data: { nom_organisation: nom.trim(), type_compte: "organisation" } },
+    });
+    if (errSignUp) { setBusy(false); setErreur(errSignUp.message || "Impossible de créer le compte."); return; }
+
+    const { error } = await supabase.from("organisations").insert({
+      type, nom: nom.trim(), email: email.trim(), pays: pays || null, ville: ville || null,
+      description: description.trim() || null, numero_enregistrement: numeroEnregistrement.trim() || null,
+      defis: defisChoisis, statut: "en_attente",
+    }).returning(false);
+    setBusy(false);
+    if (error) { setErreur("Le compte a été créé mais l'inscription de l'organisation a échoué : " + (error.message || "erreur inconnue")); return; }
+    setDone(true);
+  }
+
+  async function seConnecter(e) {
+    if (e && e.preventDefault) e.preventDefault();
+    setLoginErreur(""); setLoginBusy(true);
+    const { error } = await supabase.auth.signInWithPassword({ email: loginEmail.trim(), password: loginPassword });
+    setLoginBusy(false);
+    if (error) { setLoginErreur("E-mail ou mot de passe incorrect."); return; }
+  }
+
+  if (organisationStatut) {
+    const info = ORGANISATION_STATUT_INFO[organisationStatut] || { label: organisationStatut, texte: "", couleur: "var(--c-text-muted)" };
+    return (
+      <div style={{ marginTop: 14, background: "var(--c-surface)", borderRadius: 14, padding: 16, border: "1px solid var(--c-border)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+          <IconShield size={17} color="var(--c-accent-dark)" />
+          <div style={{ fontFamily: "Fraunces, serif", fontSize: 15, fontWeight: 600, color: "var(--c-accent-dark)" }}>Compte Organisation</div>
+        </div>
+        <div style={{ display: "inline-block", fontSize: 10.5, fontWeight: 700, color: "#fff", background: info.couleur, borderRadius: 999, padding: "3px 10px", marginBottom: 8 }}>{info.label}</div>
+        <div style={{ fontSize: 12.5, color: "var(--c-text-secondary)", lineHeight: 1.5 }}>{info.texte}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ marginTop: 14, background: "var(--c-surface)", borderRadius: 14, padding: 16, border: "1px solid var(--c-border)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+        <IconShield size={17} color="var(--c-accent-dark)" />
+        <div style={{ fontFamily: "Fraunces, serif", fontSize: 15, fontWeight: 600, color: "var(--c-accent-dark)" }}>Compte Organisation</div>
+      </div>
+
+      {done ? (
+        <div style={{ fontSize: 12.5, color: "var(--c-accent)", display: "flex", alignItems: "center", gap: 6 }}>
+          <IconCheck size={14} /> Demande envoyée. Confirme ton e-mail, puis attends la validation de l'équipe PACE.
+        </div>
+      ) : mode === "choix" ? (
+        <>
+          <div style={{ fontSize: 12.5, color: "var(--c-text-secondary)", marginBottom: 10 }}>Pour une ONG ou une administration publique intervenant dans un ou plusieurs domaines environnementaux.</div>
+          <button onClick={() => setMode("inscription")} style={{ padding: "9px 14px", borderRadius: 10, border: "1px solid var(--c-accent-dark)", background: "var(--c-surface)", color: "var(--c-accent-dark)", fontWeight: 600, fontSize: 12.5, cursor: "pointer", marginRight: 8 }}>Créer un compte</button>
+          <button onClick={() => setMode("connexion")} style={{ padding: "9px 14px", borderRadius: 10, border: "none", background: "none", color: "var(--c-text-muted)", fontWeight: 600, fontSize: 12.5, cursor: "pointer" }}>Déjà inscrit ? Se connecter</button>
+        </>
+      ) : mode === "connexion" ? (
+        <form onSubmit={seConnecter}>
+          <input required type="email" value={loginEmail} onChange={e => setLoginEmail(e.target.value)} placeholder="Adresse e-mail de l'organisation"
+            style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
+          <PasswordInput value={loginPassword} onChange={e => setLoginPassword(e.target.value)} placeholder="Mot de passe"
+            style={{ padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10 }} />
+          {loginErreur && <div role="alert" style={{ fontSize: 12, color: "#B5451B", marginBottom: 10 }}>{loginErreur}</div>}
+          <button type="button" onClick={seConnecter} disabled={loginBusy} style={{ width: "100%", padding: "10px 0", borderRadius: 10, border: "none", background: "var(--c-accent-dark)", color: "#fff", fontWeight: 600, fontSize: 13, cursor: "pointer", marginBottom: 8 }}>
+            {loginBusy ? "…" : "Se connecter"}
+          </button>
+          <button type="button" onClick={() => setMode("choix")} style={{ width: "100%", padding: "8px 0", borderRadius: 10, border: "none", background: "none", color: "var(--c-text-muted)", fontSize: 12, cursor: "pointer" }}>Retour</button>
+        </form>
+      ) : (
+        <form onSubmit={inscrire}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            {[["ong", "ONG"], ["gouvernement", "Gouvernement"]].map(([id, label]) => (
+              <button key={id} type="button" onClick={() => setType(id)} style={{
+                flex: 1, padding: "9px 0", borderRadius: 10, fontSize: 12.5, fontWeight: 600, cursor: "pointer",
+                border: type === id ? "2px solid var(--c-accent)" : "1px solid var(--c-border)",
+                background: type === id ? "var(--c-surface-soft)" : "var(--c-surface)", color: type === id ? "var(--c-accent)" : "var(--c-text-secondary)" }}>{label}</button>
+            ))}
+          </div>
+
+          <input required value={nom} onChange={e => setNom(e.target.value)} placeholder="Nom de l'organisation"
+            style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
+          <input value={pays} onChange={e => setPays(e.target.value)} placeholder="Pays"
+            style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
+          <input value={ville} onChange={e => setVille(e.target.value)} placeholder="Ville"
+            style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
+          {type === "ong" && (
+            <input value={numeroEnregistrement} onChange={e => setNumeroEnregistrement(e.target.value)} placeholder="Numéro d'enregistrement (optionnel)"
+              style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
+          )}
+          <textarea value={description} onChange={e => setDescription(e.target.value)} rows={2} placeholder="Brève description (optionnel)"
+            style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10, boxSizing: "border-box", fontFamily: "Work Sans, sans-serif", resize: "none" }} />
+
+          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--c-text)", marginBottom: 6 }}>Domaine(s) d'activité *</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+            {defisDisponibles.map(d => {
+              const actif = defisChoisis.includes(d.id);
+              return (
+                <button key={d.id} type="button" onClick={() => toggleDefi(d.id)} style={{
+                  padding: "6px 10px", borderRadius: 20, fontSize: 11.5, fontWeight: 600, cursor: "pointer",
+                  border: actif ? "1.5px solid var(--c-accent)" : "1px solid var(--c-border)",
+                  background: actif ? "var(--c-surface-soft)" : "var(--c-surface)", color: actif ? "var(--c-accent)" : "var(--c-text-secondary)" }}>
+                  {champTexte(d.nom) || d.id}
+                </button>
+              );
+            })}
+            {defisDisponibles.length === 0 && <div style={{ fontSize: 11, color: "var(--c-text-muted)" }}>Aucun défi publié pour le moment.</div>}
+          </div>
+
+          <div style={{ fontSize: 10.5, color: "var(--c-text-muted)", margin: "2px 0 8px" }}>Un compte réel (e-mail + mot de passe) permet à plusieurs membres de ton équipe de se connecter.</div>
+          <input required type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="Adresse e-mail de l'organisation"
+            style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
+          <PasswordInput value={password} onChange={e => setPassword(e.target.value)} placeholder="Mot de passe (8 caractères minimum)"
+            style={{ padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8 }} />
+          <PasswordInput value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} placeholder="Confirme le mot de passe"
+            style={{ padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10 }} />
+
+          {erreur && <div role="alert" style={{ fontSize: 12.5, color: "#B5451B", background: "var(--c-danger-border-soft)", borderRadius: 10, padding: "9px 12px", marginBottom: 10 }}>{erreur}</div>}
+
+          <button type="button" onClick={inscrire} disabled={busy} style={{ width: "100%", padding: "10px 0", borderRadius: 10, border: "none", background: "var(--c-accent-dark)", color: "#fff", fontWeight: 600, fontSize: 13, cursor: "pointer", marginBottom: 8 }}>
+            {busy ? "…" : "Créer le compte"}
+          </button>
+          <button type="button" onClick={() => setMode("choix")} style={{ width: "100%", padding: "8px 0", borderRadius: 10, border: "none", background: "none", color: "var(--c-text-muted)", fontSize: 12, cursor: "pointer" }}>Retour</button>
+        </form>
+      )}
+    </div>
+  );
+}
+
 function BenevoleAccesBloque({ statut }) {
   const infos = {
     en_attente: {
@@ -4027,6 +4218,124 @@ function buildPaceStatsReplies(signalements, arbres, observations, actualites) {
     categorieTop: categorieTopLabel ? `Le type de signalement le plus fréquent en ce moment est : "${categorieTopLabel}" (${categorieTop[1]} signalement${categorieTop[1] > 1 ? "s" : ""}).` : "Aucun signalement n'a encore été enregistré sur l'app.",
     actualites: news.length ? `Dernière actualité PACE : "${news[0].titre || news[0].contenu || ""}".` : "Aucune actualité n'est publiée pour le moment — consulte l'onglet Actualités régulièrement.",
   };
+}
+
+function EspaceOrganisation({ organisationEmail, onBack }) {
+  const [org, setOrg] = useState(null);
+  const [signalements, setSignalements] = useState(null);
+  const [defisNoms, setDefisNoms] = useState({});
+  const [titreActu, setTitreActu] = useState("");
+  const [contenuActu, setContenuActu] = useState("");
+  const [urgentActu, setUrgentActu] = useState(false);
+  const [busyActu, setBusyActu] = useState(false);
+  const [messageActu, setMessageActu] = useState("");
+
+  async function charger() {
+    const { data: orgData } = await supabase.from("organisations").select("*").eq("email", organisationEmail).eq("is_deleted", false).order("created_at", { ascending: false }).limit(1).maybeSingle();
+    if (!orgData) return;
+    setOrg(orgData);
+    const [{ data: problemes }, { data: defis }] = await Promise.all([
+      supabase.from("env_problemes").select("code, defi_id"),
+      supabase.from("env_defis").select("id, nom").in("id", orgData.defis && orgData.defis.length ? orgData.defis : ["00000000-0000-0000-0000-000000000000"]),
+    ]);
+    const idxNoms = {};
+    (defis || []).forEach(d => { idxNoms[d.id] = champTexte(d.nom) || d.id; });
+    setDefisNoms(idxNoms);
+    const codesDomaine = (problemes || []).filter(p => (orgData.defis || []).includes(p.defi_id)).map(p => p.code);
+    if (codesDomaine.length === 0) { setSignalements([]); return; }
+    const { data: sigs } = await supabase.from("signalements").select("*").in("categorie", codesDomaine).eq("is_deleted", false).order("created_at", { ascending: false }).limit(300);
+    setSignalements(sigs || []);
+  }
+  useEffect(() => { charger(); }, [organisationEmail]);
+
+  async function resoudre(s) {
+    const { error } = await supabase.from("signalements").update({ statut: "resolu" }).eq("id", s.id);
+    if (!error) charger(); else alert("Action refusée par le serveur.");
+  }
+  async function valider(s) {
+    const { error } = await supabase.from("signalements").update({ valide: true }).eq("id", s.id);
+    if (!error) charger(); else alert("Action refusée par le serveur.");
+  }
+
+  async function publierActualite(e) {
+    if (e && e.preventDefault) e.preventDefault();
+    if (!titreActu.trim() || !contenuActu.trim()) return;
+    setBusyActu(true); setMessageActu("");
+    const { error } = await supabase.from("actualites").insert({
+      titre: titreActu.trim(), contenu: contenuActu.trim(), urgent: urgentActu,
+      auteur_organisation_id: org.id, auteur_nom: org.nom,
+    }).returning(false);
+    setBusyActu(false);
+    if (error) { setMessageActu("Échec : " + (error.message || "erreur inconnue")); return; }
+    setTitreActu(""); setContenuActu(""); setUrgentActu(false);
+    setMessageActu("Actualité publiée.");
+  }
+
+  if (!org) return <Screen><div style={{ textAlign: "center", padding: 40, color: "var(--c-text-muted)" }}>Chargement…</div></Screen>;
+
+  const colonnes = [
+    { key: "id", label: "ID" }, { key: "categorie", label: "Catégorie" }, { key: "urgence", label: "Urgence" },
+    { key: "statut", label: "Statut" }, { key: "description", label: "Description" },
+    { key: "lat", label: "Latitude" }, { key: "lng", label: "Longitude" }, { key: "date", label: "Date" },
+  ];
+  const rowsExport = (signalements || []).map(s => ({ ...s, date: new Date(s.created_at).toLocaleDateString("fr-FR") }));
+
+  return (
+    <Screen>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+        <button onClick={onBack} style={{ padding: 8, borderRadius: 10, border: "1px solid var(--c-border)", background: "var(--c-surface)", cursor: "pointer" }}><IconChevronLeft size={16} /></button>
+        <SectionTitle sub={org.type === "ong" ? "Espace ONG" : "Espace Gouvernement"}>{org.nom}</SectionTitle>
+      </div>
+
+      <div style={{ fontSize: 11.5, color: "var(--c-text-muted)", marginBottom: 14 }}>
+        Domaine(s) : {(org.defis || []).map(id => defisNoms[id] || id).join(", ") || "aucun"}
+      </div>
+
+      <div style={{ fontFamily: "Fraunces, serif", fontSize: 15, fontWeight: 600, color: "var(--c-accent-dark)", marginBottom: 10 }}>Signalements de votre domaine</div>
+      {signalements === null ? (
+        <div style={{ textAlign: "center", color: "var(--c-text-muted)", fontSize: 13 }}>Chargement…</div>
+      ) : signalements.length === 0 ? (
+        <div style={{ textAlign: "center", color: "var(--c-text-muted)", fontSize: 13, padding: 20 }}>Aucun signalement dans votre domaine pour le moment.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
+          {signalements.map(s => {
+            const cat = categorieMeta(s.categorie);
+            return (
+              <div key={s.id} style={{ background: "var(--c-surface)", border: "1px solid var(--c-border)", borderRadius: 12, padding: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 600 }}>{cat.label}</div>
+                  <span style={{ fontSize: 10, fontWeight: 600, color: s.statut === "resolu" ? "var(--c-accent)" : "#B5451B" }}>{s.statut === "resolu" ? "Résolu" : "En attente"}</span>
+                </div>
+                <div style={{ fontSize: 11.5, color: "var(--c-text-secondary)", marginTop: 4 }}>{s.description}</div>
+                <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                  {!s.valide && <button onClick={() => valider(s)} style={{ fontSize: 10.5, padding: "5px 10px", borderRadius: 8, border: "1px solid var(--c-border)", background: "var(--c-surface)", cursor: "pointer" }}>Valider</button>}
+                  {s.statut !== "resolu" && <button onClick={() => resoudre(s)} style={{ fontSize: 10.5, padding: "5px 10px", borderRadius: 8, border: "none", background: "var(--c-accent-dark)", color: "#fff", cursor: "pointer" }}>Marquer résolu</button>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div style={{ fontFamily: "Fraunces, serif", fontSize: 15, fontWeight: 600, color: "var(--c-accent-dark)", marginBottom: 10 }}>Rapport de votre organisation</div>
+      <ExportRow label="Signalements de votre domaine" count={rowsExport.length} columns={colonnes} filenamePrefix={`pace-${org.type}-${(org.nom || "org").replace(/\s+/g, "-")}`} title={`Rapport ${org.nom}`} getRows={() => rowsExport} />
+
+      <div style={{ fontFamily: "Fraunces, serif", fontSize: 15, fontWeight: 600, color: "var(--c-accent-dark)", margin: "20px 0 10px" }}>Publier une actualité officielle</div>
+      <form onSubmit={publierActualite} style={{ background: "var(--c-surface)", border: "1px solid var(--c-border)", borderRadius: 12, padding: 14 }}>
+        <input required value={titreActu} onChange={e => setTitreActu(e.target.value)} placeholder="Titre"
+          style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
+        <textarea required value={contenuActu} onChange={e => setContenuActu(e.target.value)} rows={3} placeholder="Contenu"
+          style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box", fontFamily: "Work Sans, sans-serif", resize: "none" }} />
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--c-text-secondary)", marginBottom: 10 }}>
+          <input type="checkbox" checked={urgentActu} onChange={e => setUrgentActu(e.target.checked)} /> Marquer comme urgent
+        </label>
+        {messageActu && <div style={{ fontSize: 11.5, color: messageActu.startsWith("Échec") ? "#B5451B" : "var(--c-accent)", marginBottom: 8 }}>{messageActu}</div>}
+        <button type="button" onClick={publierActualite} disabled={busyActu} style={{ width: "100%", padding: "10px 0", borderRadius: 10, border: "none", background: "var(--c-accent-dark)", color: "#fff", fontWeight: 600, fontSize: 13, cursor: "pointer" }}>
+          {busyActu ? "…" : "Publier"}
+        </button>
+      </form>
+    </Screen>
+  );
 }
 
 function AssistantIA({ onBack, signalements, arbres, observations, actualites }) {
@@ -4651,7 +4960,7 @@ function AdminSpace({ signalements, arbres, onUpdateStatut, onResolve, onValidat
       </div>
 
       <div style={{ display: "flex", gap: 6, marginBottom: 18, overflowX: "auto" }}>
-        {[["signalements", "Signalements", IconAlert], ["arbres", "Arbres", IconTree], ["actualites", "Actualités", IconNewspaper], ["benevoles", "Bénévoles", IconUsers], ["historique", "Historique", IconClock], ["securite", "Sécurité", IconShield], ["contenu_env", "Taxonomie", IconLayers], ["rapports", "Rapports", IconDownload], ["suppressions", "Suppressions", IconUserCircle]].map(([id, label, Ic]) => (
+        {[["signalements", "Signalements", IconAlert], ["arbres", "Arbres", IconTree], ["actualites", "Actualités", IconNewspaper], ["benevoles", "Bénévoles", IconUsers], ["organisations", "Organisations", IconShield], ["historique", "Historique", IconClock], ["securite", "Sécurité", IconShield], ["contenu_env", "Taxonomie", IconLayers], ["rapports", "Rapports", IconDownload], ["suppressions", "Suppressions", IconUserCircle]].map(([id, label, Ic]) => (
           <button key={id} onClick={() => setPanel(id)} style={{
             display: "flex", alignItems: "center", gap: 5, padding: "7px 12px", borderRadius: 20, fontSize: 11.5, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap",
             border: panel === id ? "1px solid var(--c-accent-dark)" : "1px solid var(--c-border)",
@@ -4813,6 +5122,7 @@ function AdminSpace({ signalements, arbres, onUpdateStatut, onResolve, onValidat
       {panel === "historique" && <AdminHistorique isSuperAdmin={isSuperAdmin} onRestaurerItem={onRestaurerItem} />}
       {panel === "securite" && <AdminSecurite />}
       {panel === "contenu_env" && <AdminContenuEnv isSuperAdmin={isSuperAdmin} adminEmail={session.user.email} />}
+      {panel === "organisations" && <AdminOrganisations isSuperAdmin={isSuperAdmin} adminEmail={session.user.email} />}
       {panel === "rapports" && <AdminRapports signalements={signalements} arbres={arbres} isSuperAdmin={isSuperAdmin} centreVerrouille={centreVerrouille} onToggleCentre={toggleCentreVerrouille} />}
       {panel === "suppressions" && <AdminSuppressions />}
 
@@ -5515,12 +5825,13 @@ function AdminHistorique({ isSuperAdmin, onRestaurerItem }) {
     setLogs(data || []);
   }
   async function loadCorbeille() {
-    const [{ data: s }, { data: a }, { data: b }] = await Promise.all([
+    const [{ data: s }, { data: a }, { data: b }, { data: o }] = await Promise.all([
       supabase.from("signalements").select("*").eq("is_deleted", true).order("deleted_at", { ascending: false }),
       supabase.from("arbres").select("*").eq("is_deleted", true).order("deleted_at", { ascending: false }),
       supabase.from("benevoles").select("*").eq("is_deleted", true).order("deleted_at", { ascending: false }),
+      supabase.from("organisations").select("*").eq("is_deleted", true).order("deleted_at", { ascending: false }),
     ]);
-    setCorbeille({ signalements: s || [], arbres: a || [], benevoles: b || [] });
+    setCorbeille({ signalements: s || [], arbres: a || [], benevoles: b || [], organisations: o || [] });
   }
   useEffect(() => { loadLogs(); loadCorbeille(); }, []);
 
@@ -5528,6 +5839,7 @@ function AdminHistorique({ isSuperAdmin, onRestaurerItem }) {
     if (table === "signalements") { return categorieMeta(item.categorie).label; }
     if (table === "arbres") return item.nom || "Arbre";
     if (table === "benevoles") return item.nom;
+    if (table === "organisations") return `${item.nom} (${item.type === "ong" ? "ONG" : "Gouvernement"})`;
     return "élément";
   }
 
@@ -5550,7 +5862,7 @@ function AdminHistorique({ isSuperAdmin, onRestaurerItem }) {
     loadCorbeille(); loadLogs();
   }
 
-  const totalCorbeille = corbeille ? corbeille.signalements.length + corbeille.arbres.length + corbeille.benevoles.length : 0;
+  const totalCorbeille = corbeille ? corbeille.signalements.length + corbeille.arbres.length + corbeille.benevoles.length + corbeille.organisations.length : 0;
 
   function CorbeilleSection({ titre, table, items }) {
     if (items.length === 0) return null;
@@ -5617,6 +5929,7 @@ function AdminHistorique({ isSuperAdmin, onRestaurerItem }) {
           <CorbeilleSection titre="Signalements" table="signalements" items={corbeille.signalements} />
           <CorbeilleSection titre="Arbres" table="arbres" items={corbeille.arbres} />
           <CorbeilleSection titre="Bénévoles" table="benevoles" items={corbeille.benevoles} />
+          <CorbeilleSection titre="Organisations" table="organisations" items={corbeille.organisations} />
         </div>
       )}
     </div>
@@ -5883,6 +6196,91 @@ function AdminContenuEnv({ isSuperAdmin, adminEmail }) {
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+const ORG_ADMIN_STATUTS = {
+  en_attente: { label: "En attente", color: "#E3A73B" },
+  valide: { label: "Validée", color: "var(--c-accent-dark)" },
+  suspendu: { label: "Suspendue", color: "#B5451B" },
+  rejete: { label: "Refusée", color: "var(--c-text-muted)" },
+};
+
+function AdminOrganisations({ isSuperAdmin, adminEmail }) {
+  const [organisations, setOrganisations] = useState(null);
+  const [defisIndex, setDefisIndex] = useState({});
+  const [busyId, setBusyId] = useState(null);
+
+  async function charger() {
+    const [{ data: orgs }, { data: defis }] = await Promise.all([
+      supabase.from("organisations").select("*").eq("is_deleted", false).order("created_at", { ascending: false }),
+      supabase.from("env_defis").select("id, nom"),
+    ]);
+    const idx = {};
+    (defis || []).forEach(d => { idx[d.id] = champTexte(d.nom) || d.id; });
+    setDefisIndex(idx);
+    setOrganisations(orgs || []);
+  }
+  useEffect(() => { charger(); }, []);
+
+  async function changerStatut(org, nouveauStatut, motif) {
+    setBusyId(org.id);
+    const payload = { statut: nouveauStatut };
+    if (nouveauStatut === "valide") { payload.valide_par = adminEmail; payload.valide_le = new Date().toISOString(); payload.motif_refus = null; }
+    if (nouveauStatut === "rejete" || nouveauStatut === "suspendu") payload.motif_refus = motif || null;
+    const { error } = await supabase.from("organisations").update(payload).eq("id", org.id);
+    setBusyId(null);
+    if (error) { alert("Action refusée par le serveur (réservée au super-admin)."); return; }
+    logAudit(`organisation_${nouveauStatut}`, "organisations", org.email, motif || null, { nom: org.nom });
+    charger();
+  }
+
+  if (organisations === null) return <div style={{ textAlign: "center", color: "var(--c-text-muted)", fontSize: 13 }}>Chargement…</div>;
+
+  return (
+    <div>
+      <div style={{ fontSize: 11.5, color: "var(--c-text-muted)", lineHeight: 1.5, marginBottom: 14 }}>
+        Comptes ONG et Gouvernement. Une organisation validée peut modérer les signalements de son ou ses domaine(s) et publier des actualités officielles.
+        {!isSuperAdmin && " Les actions de validation sont réservées au super-admin."}
+      </div>
+      {organisations.length === 0 && <div style={{ textAlign: "center", color: "var(--c-text-muted)", fontSize: 13, padding: 20 }}>Aucune organisation inscrite.</div>}
+      {organisations.map(o => {
+        const s = ORG_ADMIN_STATUTS[o.statut] || { label: o.statut, color: "var(--c-text-muted)" };
+        return (
+          <div key={o.id} style={{ background: "var(--c-surface)", border: "1px solid var(--c-border)", borderRadius: 12, padding: 14, marginBottom: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+              <div>
+                <div style={{ fontFamily: "Fraunces, serif", fontSize: 14, fontWeight: 600, color: "var(--c-text)" }}>{o.nom}</div>
+                <div style={{ fontSize: 11, color: "var(--c-text-muted)" }}>{o.type === "ong" ? "ONG" : "Gouvernement"} · {o.email}</div>
+                {(o.ville || o.pays) && <div style={{ fontSize: 11, color: "var(--c-text-muted)" }}>{[o.ville, o.pays].filter(Boolean).join(", ")}</div>}
+              </div>
+              <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 999, background: s.color, color: "#fff", flexShrink: 0 }}>{s.label}</span>
+            </div>
+            <div style={{ fontSize: 11, color: "var(--c-text-secondary)", marginTop: 8 }}>
+              <b>Domaine(s) :</b> {(o.defis || []).map(id => defisIndex[id] || id).join(", ") || "aucun"}
+            </div>
+            {o.numero_enregistrement && <div style={{ fontSize: 10.5, color: "var(--c-text-muted)" }}>N° enregistrement : {o.numero_enregistrement}</div>}
+            {o.motif_refus && <div style={{ fontSize: 10.5, color: "#B5451B", marginTop: 4 }}>Motif : {o.motif_refus}</div>}
+            {isSuperAdmin && (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
+                {o.statut !== "valide" && (
+                  <button disabled={busyId === o.id} onClick={() => changerStatut(o, "valide")} style={{ fontSize: 10.5, padding: "5px 10px", borderRadius: 8, border: "none", background: "var(--c-accent-dark)", color: "#fff", fontWeight: 600, cursor: "pointer" }}>Valider</button>
+                )}
+                {o.statut === "en_attente" && (
+                  <button disabled={busyId === o.id} onClick={() => { const m = prompt("Motif du refus :") || ""; changerStatut(o, "rejete", m); }} style={{ fontSize: 10.5, padding: "5px 10px", borderRadius: 8, border: "1px solid #B5451B", background: "var(--c-danger-border-soft)", color: "#B5451B", fontWeight: 600, cursor: "pointer" }}>Refuser</button>
+                )}
+                {o.statut === "valide" && (
+                  <button disabled={busyId === o.id} onClick={() => { const m = prompt("Motif de la suspension :") || ""; changerStatut(o, "suspendu", m); }} style={{ fontSize: 10.5, padding: "5px 10px", borderRadius: 8, border: "1px solid var(--c-border)", background: "var(--c-surface)", color: "var(--c-text-secondary)", fontWeight: 600, cursor: "pointer" }}>Suspendre</button>
+                )}
+                {o.statut === "suspendu" && (
+                  <button disabled={busyId === o.id} onClick={() => changerStatut(o, "en_attente")} style={{ fontSize: 10.5, padding: "5px 10px", borderRadius: 8, border: "1px solid var(--c-border)", background: "var(--c-surface)", color: "var(--c-text-secondary)", fontWeight: 600, cursor: "pointer" }}>Remettre en attente</button>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -6273,7 +6671,30 @@ function App() {
   }, []);
   const accesBloque = benevoleStatut && benevoleStatut !== "valide";
   const estBenevoleValide = benevoleStatut === "valide";
-  const statutEnCours = benevoleStatutChargement;
+
+  // Statut d'un compte Organisation (ONG/Gouvernement) : basé sur un vrai compte email/mot de
+  // passe (citoyenSession), pas sur device_id. Nécessite une session active pour être vérifié —
+  // contrairement au bénévole, une organisation doit se connecter sur chaque nouvel appareil.
+  const [organisationStatut, setOrganisationStatut] = useState(null);
+  const [organisationType, setOrganisationType] = useState(null);
+  const [organisationChargement, setOrganisationChargement] = useState(true);
+  useEffect(() => {
+    if (citoyenSession === undefined) return; // session en cours de résolution
+    if (!citoyenSession || !citoyenSession.user || !citoyenSession.user.email) {
+      setOrganisationStatut(null); setOrganisationType(null); setOrganisationChargement(false);
+      return;
+    }
+    supabase.from("organisations").select("statut, type").eq("email", citoyenSession.user.email).eq("is_deleted", false).order("created_at", { ascending: false }).limit(1)
+      .then(({ data }) => {
+        if (data && data.length > 0) { setOrganisationStatut(data[0].statut); setOrganisationType(data[0].type); }
+        else if (data) { setOrganisationStatut(null); setOrganisationType(null); }
+        setOrganisationChargement(false);
+      });
+  }, [citoyenSession]);
+  const estOrganisationValidee = organisationStatut === "valide";
+  const accesEtendu = estBenevoleValide || estOrganisationValidee; // bénévole validé OU organisation validée
+
+  const statutEnCours = benevoleStatutChargement || organisationChargement;
   const ecransReserves = ["carte", "signaler", "arbre", "biodiversite", "confidentialite", "assistant"];
 
   // Garde-fou : si le tab courant est réservé et que le citoyen est confirmé non-bénévole,
@@ -6282,8 +6703,9 @@ function App() {
   // un lien direct vers un onglet réservé.
   useEffect(() => {
     if (statutEnCours) return;
-    if (ecransReserves.includes(tab) && !estBenevoleValide) setTab("accueil");
-  }, [tab, estBenevoleValide, statutEnCours]);
+    if (ecransReserves.includes(tab) && !accesEtendu) setTab("accueil");
+    if (tab === "espace_org" && !estOrganisationValidee) setTab("accueil");
+  }, [tab, accesEtendu, estOrganisationValidee, statutEnCours]);
 
   const [showThemePanel, setShowThemePanel] = useState(false);
 
@@ -6764,27 +7186,29 @@ function App() {
           <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "60vh", color: "var(--c-text-muted)", fontSize: 13, gap: 8 }}>
             <IconClock size={15} /> Vérification de l'accès…
           </div>
-        ) : tab === "biodiversite" && estBenevoleValide ? (
+        ) : tab === "biodiversite" && accesEtendu ? (
           <Biodiversite observations={observations} onAdd={addObservation} onBack={() => setTab("accueil")} lang={lang} />
-        ) : tab === "confidentialite" && estBenevoleValide ? (
+        ) : tab === "confidentialite" && accesEtendu ? (
           <Confidentialite onBack={() => setTab("accueil")} />
-        ) : tab === "assistant" && estBenevoleValide ? (
+        ) : tab === "assistant" && accesEtendu ? (
           <AssistantIA onBack={() => setTab("accueil")} signalements={signalements} arbres={arbres} observations={observations} actualites={actualites} />
+        ) : tab === "espace_org" && estOrganisationValidee ? (
+          <EspaceOrganisation organisationEmail={citoyenSession && citoyenSession.user && citoyenSession.user.email} onBack={() => setTab("accueil")} />
         ) : (
           <div key={tab} className="pace-fade-in">
-            {tab === "accueil" && <Accueil signalements={signalements.filter(s => s.device_id === DEVICE_ID)} arbres={arbres.filter(a => a.device_id === DEVICE_ID)} notifState={notifState} onEnableNotif={enableNotif} onOpenAdmin={() => setShowAdmin(true)} actualites={actualites} onNavigate={setTab} lang={lang} estBenevoleValide={estBenevoleValide} benevoleStatut={benevoleStatut} onBenevoleInscrit={() => { setBenevoleStatut("en_attente"); try { localStorage.setItem("pace-benevole-statut", "en_attente"); } catch (e) {} }} />}
-            {tab === "carte" && estBenevoleValide && <Carte signalements={signalements} arbres={arbres} observations={observations} onAddSignalement={addSignalement} onAddArbre={addArbre} onAddObservation={addObservation} online={online} pendingQueueCount={pendingQueueCount} onFlushQueue={flushPendingQueue} lang={lang} coordFormat={coordFormat} />}
-            {tab === "signaler" && estBenevoleValide && <Signaler onSubmit={addSignalement} lang={lang} />}
-            {tab === "arbre" && estBenevoleValide && <MonArbre arbres={arbres.filter(a => a.device_id === DEVICE_ID)} suivis={suivis} onAdd={addArbre} onAddSuivi={addSuivi} lang={lang} coordFormat={coordFormat} />}
+            {tab === "accueil" && <Accueil signalements={signalements.filter(s => s.device_id === DEVICE_ID)} arbres={arbres.filter(a => a.device_id === DEVICE_ID)} notifState={notifState} onEnableNotif={enableNotif} onOpenAdmin={() => setShowAdmin(true)} actualites={actualites} onNavigate={setTab} lang={lang} estBenevoleValide={estBenevoleValide} benevoleStatut={benevoleStatut} onBenevoleInscrit={() => { setBenevoleStatut("en_attente"); try { localStorage.setItem("pace-benevole-statut", "en_attente"); } catch (e) {} }} estOrganisationValidee={estOrganisationValidee} organisationStatut={organisationStatut} />}
+            {tab === "carte" && accesEtendu && <Carte signalements={signalements} arbres={arbres} observations={observations} onAddSignalement={addSignalement} onAddArbre={addArbre} onAddObservation={addObservation} online={online} pendingQueueCount={pendingQueueCount} onFlushQueue={flushPendingQueue} lang={lang} coordFormat={coordFormat} />}
+            {tab === "signaler" && accesEtendu && <Signaler onSubmit={addSignalement} lang={lang} />}
+            {tab === "arbre" && accesEtendu && <MonArbre arbres={arbres.filter(a => a.device_id === DEVICE_ID)} suivis={suivis} onAdd={addArbre} onAddSuivi={addSuivi} lang={lang} coordFormat={coordFormat} />}
           </div>
         )}
 
-        {!showAdmin && !accesBloque && tab !== "biodiversite" && tab !== "confidentialite" && tab !== "assistant" && (
+        {!showAdmin && !accesBloque && tab !== "biodiversite" && tab !== "confidentialite" && tab !== "assistant" && tab !== "espace_org" && (
           <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, background: "var(--c-surface)", borderTop: "1px solid var(--c-border)", display: "flex", padding: "8px 6px", borderRadius: "18px 18px 0 0", boxShadow: "0 -4px 16px rgba(0,0,0,0.04)" }}>
             {TABS.map(tabItem => {
               const IconT = tabItem.icon;
               const active = tab === tabItem.id;
-              const verrouille = tabItem.id !== "accueil" && !estBenevoleValide;
+              const verrouille = tabItem.id !== "accueil" && !accesEtendu;
               const navLabels = { accueil: t(lang, "nav_accueil"), carte: t(lang, "nav_carte"), arbre: t(lang, "nav_arbre") };
               return (
                 <button key={tabItem.id} onClick={() => setTab(verrouille ? "accueil" : tabItem.id)} style={{ flex: 1, background: "none", border: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, padding: "6px 0", opacity: verrouille ? 0.45 : 1 }}>
