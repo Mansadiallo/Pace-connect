@@ -740,6 +740,73 @@ function restHeaders(extra) {
   return Object.assign({ apikey: SUPABASE_KEY, Authorization: "Bearer " + (token || SUPABASE_KEY) }, extra || {});
 }
 
+// --- Session "citoyen anonyme" (Supabase Anonymous Sign-in) ---------------------------------
+// Distincte de currentSession (réservée à la connexion email/mot de passe des organisations et
+// de l'admin) : sert uniquement à prouver, côté RLS, quel appareil est à l'origine d'une action
+// en libre-service (créer/rouvrir/résoudre SES PROPRES signalements). Contrairement à DEVICE_ID
+// (une simple chaîne générée côté client, visible de tous dans le flux public), cette session
+// donne un vrai auth.uid() vérifiable par Postgres — impossible à usurper en lisant les données
+// publiques. Nécessite que "Anonymous sign-ins" soit activé dans Authentication > Sign In / Providers.
+let deviceSession = null;
+try { deviceSession = JSON.parse(localStorage.getItem("pace-device-session") || "null"); } catch (e) { deviceSession = null; }
+
+function persistDeviceSession(session) {
+  deviceSession = session;
+  try {
+    if (session) localStorage.setItem("pace-device-session", JSON.stringify(session));
+    else localStorage.removeItem("pace-device-session");
+  } catch (e) {}
+}
+
+let deviceRefreshInFlight = null;
+async function refreshDeviceSessionIfNeeded() {
+  if (!deviceSession || !deviceSession.refresh_token) return;
+  const exp = decodeJwtExp(deviceSession.access_token);
+  const now = Math.floor(Date.now() / 1000);
+  if (exp && exp - now > 300) return;
+  if (deviceRefreshInFlight) return deviceRefreshInFlight;
+  deviceRefreshInFlight = (async () => {
+    try {
+      const res = await fetch(`${AUTH_URL}/token?grant_type=refresh_token`, {
+        method: "POST",
+        headers: { apikey: SUPABASE_KEY, "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: deviceSession.refresh_token }),
+      });
+      if (res.ok) {
+        const json = await res.json().catch(() => ({}));
+        if (json.access_token) persistDeviceSession({ access_token: json.access_token, refresh_token: json.refresh_token, user: json.user || deviceSession.user });
+      } else if (res.status === 400 || res.status === 401 || res.status === 403) {
+        persistDeviceSession(null); // refresh_token révoqué/expiré : on en redemandera un neuf
+      }
+    } catch (e) { /* réseau indisponible : transitoire, on retentera plus tard */ }
+    deviceRefreshInFlight = null;
+  })();
+  return deviceRefreshInFlight;
+}
+
+// Renvoie une session anonyme valide pour cet appareil, en (re)créant une le cas échéant.
+// Renvoie null si hors-ligne ou si les connexions anonymes ne sont pas encore activées côté
+// Supabase : les appelants doivent alors se comporter comme avant (ou avertir l'utilisateur).
+async function ensureDeviceSession() {
+  await refreshDeviceSessionIfNeeded();
+  if (deviceSession && deviceSession.access_token) return deviceSession;
+  try {
+    const res = await fetch(`${AUTH_URL}/signup`, {
+      method: "POST",
+      headers: { apikey: SUPABASE_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ data: {}, gotrue_meta_security: {} }),
+    });
+    if (!res.ok) return null;
+    const json = await res.json().catch(() => null);
+    if (json && json.access_token) {
+      const session = { access_token: json.access_token, refresh_token: json.refresh_token, user: json.user };
+      persistDeviceSession(session);
+      return session;
+    }
+  } catch (e) { /* pas de réseau : on retentera au prochain appel */ }
+  return null;
+}
+
 class PaceQuery {
   constructor(table) {
     this.table = table;
@@ -969,6 +1036,16 @@ function getDeviceId() {
   }
 }
 const DEVICE_ID = getDeviceId();
+
+// Renvoie les renseignements du bénévole inscrit sur cet appareil (nom, contact, pays, ville,
+// quartier), mis en cache lors de l'inscription — ou null si l'appareil n'a jamais rempli le
+// formulaire bénévole. Utilisé pour accompagner automatiquement ses signalements.
+function getBenevoleInfo() {
+  try {
+    const raw = localStorage.getItem("pace-benevole-info");
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
 
 // --- Point 3 : accessibilité — dictionnaire de traduction (FR par défaut, EN en premier palier).
 // Couvre la navigation principale et les titres d'écran ; le reste de l'app reste en français pour l'instant.
@@ -3810,6 +3887,7 @@ function VolunteerCard({ lang, benevoleStatut, onInscrit }) {
   const [zone, setZone] = useState("");
   const [busy, setBusy] = useState(false);
   const [erreur, setErreur] = useState("");
+  const [code, setCode] = useState("");
 
   const indicatif = (PAYS_INDICATIFS.find(p => p.pays === pays) || {}).indicatif || "";
 
@@ -3823,10 +3901,34 @@ function VolunteerCard({ lang, benevoleStatut, onInscrit }) {
     if (indicatif && contactFinal && !contactFinal.includes("@") && !contactFinal.startsWith("+")) {
       contactFinal = `${indicatif} ${contactFinal}`;
     }
-    const { error } = await supabase.from("benevoles").insert({ nom, contact: contactFinal, pays: pays || null, ville: ville || null, zone, device_id: DEVICE_ID, statut: "en_attente" }).returning(false);
+    // Un id est généré côté client (repris tel quel par la colonne "id" par défaut de type uuid)
+    // pour pouvoir le mettre en cache sans avoir besoin de relire la ligne après insertion —
+    // la table "benevoles" n'étant pas lisible publiquement, un select-after-insert échouerait.
+    const benevoleId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : (uid() + "-" + uid() + "-" + uid());
+    // L'insertion passe par une fonction serveur (RPC) plutôt qu'un insert direct : c'est elle
+    // qui vérifie le code d'organisation (si saisi) et résout l'organisation correspondante —
+    // jamais le client, pour qu'il soit impossible de s'auto-assigner à une organisation en
+    // devinant/forgeant un id sans connaître son vrai code.
+    const { error } = await supabase.rpc("benevole_inscrire", {
+      p_id: benevoleId, p_nom: nom, p_contact: contactFinal, p_pays: pays || null, p_ville: ville || null,
+      p_zone: zone || null, p_device_id: DEVICE_ID, p_code: code.trim() || null,
+    });
+    if (error) {
+      setBusy(false);
+      if (error.message && error.message.includes("code_invalide")) {
+        setErreur("Le code saisi est incorrect ou n'est pas lié à une organisation.");
+      } else {
+        setErreur(t(lang, "inscription_echec") + (error.message ? "\n(" + error.message + ")" : ""));
+      }
+      return;
+    }
+    // Mis en cache localement : permet d'accompagner automatiquement chaque signalement fait
+    // depuis cet appareil des renseignements du bénévole (et son id, pour qu'une organisation
+    // puisse l'assigner à elle-même), sans avoir à les redemander ni à relire la table
+    // "benevoles" (qui n'est pas lisible publiquement).
+    try { localStorage.setItem("pace-benevole-info", JSON.stringify({ id: benevoleId, nom, contact: contactFinal, pays: pays || null, ville: ville || null, quartier: zone || null })); } catch (e) {}
     setBusy(false);
-    if (!error) { setDone(true); setNom(""); setContact(""); setPays(""); setVille(""); setZone(""); if (onInscrit) onInscrit(); }
-    else alert(t(lang, "inscription_echec") + (error && error.message ? "\n(" + error.message + ")" : ""));
+    setDone(true); setNom(""); setContact(""); setPays(""); setVille(""); setZone(""); setCode(""); if (onInscrit) onInscrit();
   }
 
   // Cet appareil a déjà une inscription (peu importe son statut) : on ne montre jamais le
@@ -3880,7 +3982,12 @@ function VolunteerCard({ lang, benevoleStatut, onInscrit }) {
           <input required value={ville} onChange={e => setVille(e.target.value)} placeholder={t(lang, "ville_label")}
             style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
           <input value={zone} onChange={e => setZone(e.target.value)} placeholder={t(lang, "quartier_zone")}
-            style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10, boxSizing: "border-box" }} />
+            style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
+          <input value={code} onChange={e => setCode(e.target.value)} placeholder="Code d'une organisation (optionnel)"
+            style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 4, boxSizing: "border-box" }} />
+          <div style={{ fontSize: 10.5, color: "var(--c-text-muted)", marginBottom: 10 }}>
+            Si une ONG ou une administration t'a communiqué un code, saisis-le ici pour qu'elle puisse t'assigner ses signalements. Laisse vide si tu ne participes à aucune organisation.
+          </div>
 
           {erreur && <div role="alert" style={{ fontSize: 12.5, color: "#B5451B", background: "var(--c-danger-border-soft)", borderRadius: 10, padding: "9px 12px", marginBottom: 10 }}>{erreur}</div>}
 
@@ -3911,6 +4018,7 @@ function OrganisationCard({ lang, organisationStatut }) {
   const [ville, setVille] = useState("");
   const [description, setDescription] = useState("");
   const [numeroEnregistrement, setNumeroEnregistrement] = useState("");
+  const [codeInscription, setCodeInscription] = useState("");
   const [defisChoisis, setDefisChoisis] = useState([]);
   const [defisDisponibles, setDefisDisponibles] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -3935,6 +4043,7 @@ function OrganisationCard({ lang, organisationStatut }) {
     if (e && e.preventDefault) e.preventDefault();
     setErreur("");
     if (!nom.trim()) { setErreur("Le nom de l'organisation est requis."); return; }
+    if (!codeInscription.trim()) { setErreur("Le code d'inscription est requis (ex : sigle de l'organisation + un numéro, comme \"PACE01\")."); return; }
     if (!email.trim() || !email.includes("@")) { setErreur("Adresse e-mail invalide."); return; }
     if (!password || password.length < 8) { setErreur("Le mot de passe doit contenir au moins 8 caractères."); return; }
     if (password !== confirmPassword) { setErreur("Les deux mots de passe ne correspondent pas."); return; }
@@ -3949,11 +4058,17 @@ function OrganisationCard({ lang, organisationStatut }) {
 
     const { error } = await supabase.from("organisations").insert({
       type, nom: nom.trim(), email: email.trim(), pays: pays || null, ville: ville || null,
-      description: description.trim() || null, numero_enregistrement: numeroEnregistrement.trim() || null,
-      defis: defisChoisis, statut: "en_attente",
+      description: description.trim() || null, numero_enregistrement: type === "ong" ? (numeroEnregistrement.trim() || null) : null,
+      code_inscription: codeInscription.trim().toUpperCase(), defis: defisChoisis, statut: "en_attente",
     }).returning(false);
     setBusy(false);
-    if (error) { setErreur("Le compte a été créé mais l'inscription de l'organisation a échoué : " + (error.message || "erreur inconnue")); return; }
+    if (error) {
+      const dup = error.message && /duplicate|unique/i.test(error.message);
+      setErreur(dup
+        ? "Ce code d'inscription est déjà utilisé par une autre organisation. Choisis-en un autre."
+        : "Le compte a été créé mais l'inscription de l'organisation a échoué : " + (error.message || "erreur inconnue"));
+      return;
+    }
     setDone(true);
   }
 
@@ -4012,7 +4127,7 @@ function OrganisationCard({ lang, organisationStatut }) {
         <form onSubmit={inscrire}>
           <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
             {[["ong", "ONG"], ["gouvernement", "Gouvernement"]].map(([id, label]) => (
-              <button key={id} type="button" onClick={() => setType(id)} style={{
+              <button key={id} type="button" onClick={() => { setType(id); if (id !== "ong") setNumeroEnregistrement(""); }} style={{
                 flex: 1, padding: "9px 0", borderRadius: 10, fontSize: 12.5, fontWeight: 600, cursor: "pointer",
                 border: type === id ? "2px solid var(--c-accent)" : "1px solid var(--c-border)",
                 background: type === id ? "var(--c-surface-soft)" : "var(--c-surface)", color: type === id ? "var(--c-accent)" : "var(--c-text-secondary)" }}>{label}</button>
@@ -4029,6 +4144,11 @@ function OrganisationCard({ lang, organisationStatut }) {
             <input value={numeroEnregistrement} onChange={e => setNumeroEnregistrement(e.target.value)} placeholder="Numéro d'enregistrement (optionnel)"
               style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
           )}
+          <input required value={codeInscription} onChange={e => setCodeInscription(e.target.value)} placeholder="Code d'inscription (ex : PACE01)"
+            style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 4, boxSizing: "border-box" }} />
+          <div style={{ fontSize: 10.5, color: "var(--c-text-muted)", marginBottom: 8 }}>
+            Choisis un code unique (sigle de ton organisation + un numéro, ex : "PACE01"). Tu le communiqueras à tes bénévoles pour qu'ils puissent te l'indiquer à leur inscription et devenir assignables chez toi.
+          </div>
           <textarea value={description} onChange={e => setDescription(e.target.value)} rows={2} placeholder="Brève description (optionnel)"
             style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10, boxSizing: "border-box", fontFamily: "Work Sans, sans-serif", resize: "none" }} />
 
@@ -4246,11 +4366,33 @@ function EspaceOrganisation({ organisationEmail, onBack }) {
   const [urgentActu, setUrgentActu] = useState(false);
   const [busyActu, setBusyActu] = useState(false);
   const [messageActu, setMessageActu] = useState("");
+  const [mesBenevoles, setMesBenevoles] = useState(null);
+  const [benevolesDisponibles, setBenevolesDisponibles] = useState(null);
+  const [busyAssign, setBusyAssign] = useState(null);
+
+  // Un gouvernement garde ses pleins droits (accès non restreint, comme avant cette
+  // fonctionnalité) ; une ONG doit d'abord s'assigner des bénévoles pour voir leurs signalements.
+  const estGouvernement = org && org.type === "gouvernement";
+
+  async function chargerBenevoles(orgData) {
+    if (!orgData) return;
+    // Seuls les bénévoles éligibles (ayant saisi le code de cette organisation à leur
+    // inscription) apparaissent ici — jamais un bénévole indépendant. Un gouvernement garde
+    // ses pleins droits et voit tous les bénévoles.
+    const req = orgData.type === "gouvernement"
+      ? supabase.from("benevoles").select("*").eq("is_deleted", false).order("created_at", { ascending: false })
+      : supabase.from("benevoles").select("*").eq("is_deleted", false).eq("organisation_code_id", orgData.id).order("created_at", { ascending: false });
+    const { data } = await req;
+    const tous = data || [];
+    setMesBenevoles(tous.filter(b => b.organisation_id === orgData.id));
+    setBenevolesDisponibles(tous.filter(b => b.organisation_id !== orgData.id));
+  }
 
   async function charger() {
     const { data: orgData } = await supabase.from("organisations").select("*").eq("email", organisationEmail).eq("is_deleted", false).order("created_at", { ascending: false }).limit(1).maybeSingle();
     if (!orgData) return;
     setOrg(orgData);
+    chargerBenevoles(orgData);
     const [{ data: problemes }, { data: defis }] = await Promise.all([
       supabase.from("env_problemes").select("code, defi_id"),
       supabase.from("env_defis").select("id, nom").in("id", orgData.defis && orgData.defis.length ? orgData.defis : ["00000000-0000-0000-0000-000000000000"]),
@@ -4260,10 +4402,33 @@ function EspaceOrganisation({ organisationEmail, onBack }) {
     setDefisNoms(idxNoms);
     const codesDomaine = (problemes || []).filter(p => (orgData.defis || []).includes(p.defi_id)).map(p => p.code);
     if (codesDomaine.length === 0) { setSignalements([]); return; }
-    const { data: sigs } = await supabase.from("signalements").select("*").in("categorie", codesDomaine).eq("is_deleted", false).order("created_at", { ascending: false }).limit(300);
+    let requete = supabase.from("signalements").select("*").in("categorie", codesDomaine).eq("is_deleted", false).order("created_at", { ascending: false }).limit(300);
+    // Un citoyen bénévole indépendant (non assigné à une organisation) reste hors de la vue
+    // "Espace organisation" d'une ONG — ses signalements restent les siens. Le gouvernement,
+    // lui, garde ses pleins droits et voit tout, comme avant cette fonctionnalité.
+    if (orgData.type !== "gouvernement") {
+      const { data: mesB } = await supabase.from("benevoles").select("id").eq("organisation_id", orgData.id).eq("is_deleted", false);
+      const ids = (mesB || []).map(b => b.id);
+      if (ids.length === 0) { setSignalements([]); return; }
+      requete = requete.in("benevole_id", ids);
+    }
+    const { data: sigs } = await requete;
     setSignalements(sigs || []);
   }
   useEffect(() => { charger(); }, [organisationEmail]);
+
+  async function assignerBenevole(b) {
+    setBusyAssign(b.id);
+    const { error } = await supabase.from("benevoles").update({ organisation_id: org.id }).eq("id", b.id);
+    setBusyAssign(null);
+    if (!error) { charger(); } else { alert("Action refusée par le serveur (ce bénévole est peut-être déjà assigné ailleurs)."); }
+  }
+  async function retirerBenevole(b) {
+    setBusyAssign(b.id);
+    const { error } = await supabase.from("benevoles").update({ organisation_id: null }).eq("id", b.id);
+    setBusyAssign(null);
+    if (!error) { charger(); } else { alert("Action refusée par le serveur."); }
+  }
 
   async function resoudre(s) {
     const { error } = await supabase.from("signalements").update({ statut: "resolu" }).eq("id", s.id);
@@ -4294,6 +4459,9 @@ function EspaceOrganisation({ organisationEmail, onBack }) {
     { key: "id", label: "ID" }, { key: "categorie", label: "Catégorie" }, { key: "urgence", label: "Urgence" },
     { key: "statut", label: "Statut" }, { key: "description", label: "Description" },
     { key: "lat", label: "Latitude" }, { key: "lng", label: "Longitude" }, { key: "date", label: "Date" },
+    { key: "benevole_nom", label: "Bénévole — Nom" }, { key: "benevole_contact", label: "Bénévole — Contact" },
+    { key: "benevole_pays", label: "Bénévole — Pays" }, { key: "benevole_ville", label: "Bénévole — Ville" },
+    { key: "benevole_quartier", label: "Bénévole — Quartier" },
   ];
   const rowsExport = (signalements || []).map(s => ({ ...s, date: new Date(s.created_at).toLocaleDateString("fr-FR") }));
 
@@ -4324,6 +4492,14 @@ function EspaceOrganisation({ organisationEmail, onBack }) {
                   <span style={{ fontSize: 10, fontWeight: 600, color: s.statut === "resolu" ? "var(--c-accent)" : "#B5451B" }}>{s.statut === "resolu" ? "Résolu" : "En attente"}</span>
                 </div>
                 <div style={{ fontSize: 11.5, color: "var(--c-text-secondary)", marginTop: 4 }}>{s.description}</div>
+                {s.benevole_nom && (
+                  <div style={{ fontSize: 10.5, color: "var(--c-text-muted)", marginTop: 4 }}>
+                    Signalé par <strong>{s.benevole_nom}</strong>
+                    {(s.benevole_ville || s.benevole_pays) && <> — {[s.benevole_ville, s.benevole_pays].filter(Boolean).join(", ")}</>}
+                    {s.benevole_quartier && <> ({s.benevole_quartier})</>}
+                    {s.benevole_contact && <> · {s.benevole_contact}</>}
+                  </div>
+                )}
                 <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
                   {!s.valide && <button onClick={() => valider(s)} style={{ fontSize: 10.5, padding: "5px 10px", borderRadius: 8, border: "1px solid var(--c-border)", background: "var(--c-surface)", cursor: "pointer" }}>Valider</button>}
                   {s.statut !== "resolu" && <button onClick={() => resoudre(s)} style={{ fontSize: 10.5, padding: "5px 10px", borderRadius: 8, border: "none", background: "var(--c-accent-dark)", color: "#fff", cursor: "pointer" }}>Marquer résolu</button>}
@@ -4331,6 +4507,54 @@ function EspaceOrganisation({ organisationEmail, onBack }) {
               </div>
             );
           })}
+        </div>
+      )}
+
+      <div style={{ fontFamily: "Fraunces, serif", fontSize: 15, fontWeight: 600, color: "var(--c-accent-dark)", marginBottom: 6 }}>Mes bénévoles{estGouvernement ? " (tous — droits gouvernementaux)" : ""}</div>
+      {!estGouvernement && org.code_inscription && (
+        <div style={{ fontSize: 11.5, color: "var(--c-text-secondary)", background: "var(--c-surface-soft)", border: "1px solid var(--c-border)", borderRadius: 10, padding: "8px 10px", marginBottom: 8 }}>
+          Votre code d'inscription : <strong>{org.code_inscription}</strong> — communiquez-le à vos bénévoles pour qu'ils le saisissent à leur inscription.
+        </div>
+      )}
+      <div style={{ fontSize: 11, color: "var(--c-text-muted)", marginBottom: 10 }}>
+        {estGouvernement
+          ? "En tant qu'organisation gouvernementale, vous voyez tous les signalements sans restriction."
+          : "Seuls les bénévoles ayant saisi votre code d'inscription apparaissent ici. Un bénévole indépendant (sans code, ou avec le code d'une autre organisation) reste invisible dans votre espace."}
+      </div>
+      {mesBenevoles === null ? (
+        <div style={{ textAlign: "center", color: "var(--c-text-muted)", fontSize: 13 }}>Chargement…</div>
+      ) : (
+        <div style={{ marginBottom: 20 }}>
+          {mesBenevoles.length > 0 && (
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "var(--c-text-secondary)", marginBottom: 6 }}>Assignés ({mesBenevoles.length})</div>
+              {mesBenevoles.map(b => (
+                <div key={b.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--c-surface)", border: "1px solid var(--c-border)", borderRadius: 10, padding: "8px 10px", marginBottom: 6 }}>
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 600 }}>{b.nom}</div>
+                    <div style={{ fontSize: 10.5, color: "var(--c-text-muted)" }}>{[b.ville, b.pays].filter(Boolean).join(", ")}{b.zone ? ` — ${b.zone}` : ""}</div>
+                  </div>
+                  <button onClick={() => retirerBenevole(b)} disabled={busyAssign === b.id} style={{ fontSize: 10.5, padding: "5px 10px", borderRadius: 8, border: "1px solid var(--c-border)", background: "var(--c-bg)", cursor: "pointer" }}>
+                    Retirer
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ fontSize: 11, fontWeight: 700, color: "var(--c-text-secondary)", marginBottom: 6 }}>{estGouvernement ? "Autres bénévoles" : "Éligibles par votre code, à assigner"} ({(benevolesDisponibles || []).length})</div>
+          {(benevolesDisponibles || []).length === 0 ? (
+            <div style={{ fontSize: 11.5, color: "var(--c-text-muted)" }}>{estGouvernement ? "Aucun autre bénévole pour le moment." : "Aucun bénévole n'a encore utilisé votre code."}</div>
+          ) : (benevolesDisponibles || []).map(b => (
+            <div key={b.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--c-surface)", border: "1px solid var(--c-border)", borderRadius: 10, padding: "8px 10px", marginBottom: 6 }}>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 600 }}>{b.nom}</div>
+                <div style={{ fontSize: 10.5, color: "var(--c-text-muted)" }}>{[b.ville, b.pays].filter(Boolean).join(", ")}{b.zone ? ` — ${b.zone}` : ""}</div>
+              </div>
+              <button onClick={() => assignerBenevole(b)} disabled={busyAssign === b.id} style={{ fontSize: 10.5, padding: "5px 10px", borderRadius: 8, border: "none", background: "var(--c-accent-dark)", color: "#fff", cursor: "pointer" }}>
+                Assigner
+              </button>
+            </div>
+          ))}
         </div>
       )}
 
@@ -5026,6 +5250,15 @@ function AdminSpace({ signalements, arbres, onUpdateStatut, onResolve, onValidat
                     <div style={{ fontSize: 10.5, color: "var(--c-text-muted)", marginBottom: 4 }}>Dernière modération : {MOTIF_LABELS_ADMIN[s.moderation_motif] || s.moderation_motif}</div>
                   )}
                   <div style={{ fontSize: 11, color: "var(--c-text-muted)", marginBottom: 6 }}>{s.date} · appareil {s.device_id.slice(0, 6)}</div>
+                  {s.benevole_nom && (
+                    <div style={{ fontSize: 11, color: "var(--c-text-secondary)", background: "var(--c-bg)", border: "1px solid var(--c-border)", borderRadius: 8, padding: "6px 8px", marginBottom: 6 }}>
+                      <IconUsers size={11} style={{ verticalAlign: -1, marginRight: 4 }} />
+                      Signalé par <strong>{s.benevole_nom}</strong>
+                      {(s.benevole_ville || s.benevole_pays) && <> — {[s.benevole_ville, s.benevole_pays].filter(Boolean).join(", ")}</>}
+                      {s.benevole_quartier && <> ({s.benevole_quartier})</>}
+                      {s.benevole_contact && <div>{s.benevole_contact}</div>}
+                    </div>
+                  )}
                   {s.description && <div style={{ fontSize: 12.5, color: "var(--c-text-secondary)", marginBottom: 8 }}>{s.description}</div>}
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                     {!s.valide && (
@@ -5483,6 +5716,9 @@ function AdminRapports({ signalements, arbres, isSuperAdmin, centreVerrouille, o
     { key: "statut", label: "Statut" }, { key: "description", label: "Description" },
     { key: "lat", label: "Latitude" }, { key: "lng", label: "Longitude" },
     { key: "date", label: "Date" }, { key: "device_id", label: "Appareil" },
+    { key: "benevole_nom", label: "Bénévole — Nom" }, { key: "benevole_contact", label: "Bénévole — Contact" },
+    { key: "benevole_pays", label: "Bénévole — Pays" }, { key: "benevole_ville", label: "Bénévole — Ville" },
+    { key: "benevole_quartier", label: "Bénévole — Quartier" },
   ];
   const colonnesArbres = [
     { key: "id", label: "ID" }, { key: "nom", label: "Espèce" }, { key: "lat", label: "Latitude" },
@@ -6221,6 +6457,7 @@ const ORG_ADMIN_STATUTS = {
   en_attente: { label: "En attente", color: "#E3A73B" },
   valide: { label: "Validée", color: "var(--c-accent-dark)" },
   suspendu: { label: "Suspendue", color: "#B5451B" },
+  bloque: { label: "Bloquée", color: "#7A1F1F" },
   rejete: { label: "Refusée", color: "var(--c-text-muted)" },
 };
 
@@ -6245,11 +6482,21 @@ function AdminOrganisations({ isSuperAdmin, adminEmail }) {
     setBusyId(org.id);
     const payload = { statut: nouveauStatut };
     if (nouveauStatut === "valide") { payload.valide_par = adminEmail; payload.valide_le = new Date().toISOString(); payload.motif_refus = null; }
-    if (nouveauStatut === "rejete" || nouveauStatut === "suspendu") payload.motif_refus = motif || null;
+    if (nouveauStatut === "rejete" || nouveauStatut === "suspendu" || nouveauStatut === "bloque") payload.motif_refus = motif || null;
     const { error } = await supabase.from("organisations").update(payload).eq("id", org.id);
     setBusyId(null);
     if (error) { alert("Action refusée par le serveur (réservée au super-admin)."); return; }
     logAudit(`organisation_${nouveauStatut}`, "organisations", org.email, motif || null, { nom: org.nom });
+    charger();
+  }
+
+  async function supprimerOrg(org) {
+    if (!confirm(`Supprimer le compte organisation "${org.nom}" ? Il sera envoyé dans la corbeille (Historique > Corbeille) et restera restaurable.`)) return;
+    setBusyId(org.id);
+    const { error } = await supabase.from("organisations").update({ is_deleted: true, deleted_at: new Date().toISOString(), deleted_by: adminEmail }).eq("id", org.id);
+    setBusyId(null);
+    if (error) { alert("Action refusée par le serveur (réservée au super-admin)."); return; }
+    logAudit("organisation_suppression", "organisations", org.email, null, { nom: org.nom });
     charger();
   }
 
@@ -6281,7 +6528,7 @@ function AdminOrganisations({ isSuperAdmin, adminEmail }) {
             {o.motif_refus && <div style={{ fontSize: 10.5, color: "#B5451B", marginTop: 4 }}>Motif : {o.motif_refus}</div>}
             {isSuperAdmin && (
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
-                {o.statut !== "valide" && (
+                {o.statut !== "valide" && o.statut !== "bloque" && (
                   <button disabled={busyId === o.id} onClick={() => changerStatut(o, "valide")} style={{ fontSize: 10.5, padding: "5px 10px", borderRadius: 8, border: "none", background: "var(--c-accent-dark)", color: "#fff", fontWeight: 600, cursor: "pointer" }}>Valider</button>
                 )}
                 {o.statut === "en_attente" && (
@@ -6293,6 +6540,15 @@ function AdminOrganisations({ isSuperAdmin, adminEmail }) {
                 {o.statut === "suspendu" && (
                   <button disabled={busyId === o.id} onClick={() => changerStatut(o, "en_attente")} style={{ fontSize: 10.5, padding: "5px 10px", borderRadius: 8, border: "1px solid var(--c-border)", background: "var(--c-surface)", color: "var(--c-text-secondary)", fontWeight: 600, cursor: "pointer" }}>Remettre en attente</button>
                 )}
+                {o.statut !== "bloque" && (
+                  <button disabled={busyId === o.id} onClick={() => { const m = prompt("Motif du blocage (compte définitivement bloqué jusqu'à déblocage manuel) :") || ""; changerStatut(o, "bloque", m); }} style={{ fontSize: 10.5, padding: "5px 10px", borderRadius: 8, border: "1px solid #7A1F1F", background: "#2a1414", color: "#ff9b9b", fontWeight: 600, cursor: "pointer" }}>Bloquer</button>
+                )}
+                {o.statut === "bloque" && (
+                  <button disabled={busyId === o.id} onClick={() => changerStatut(o, "en_attente")} style={{ fontSize: 10.5, padding: "5px 10px", borderRadius: 8, border: "1px solid var(--c-border)", background: "var(--c-surface)", color: "var(--c-text-secondary)", fontWeight: 600, cursor: "pointer" }}>Débloquer</button>
+                )}
+                <button disabled={busyId === o.id} onClick={() => supprimerOrg(o)} style={{ fontSize: 10.5, padding: "5px 10px", borderRadius: 8, border: "1px solid var(--c-danger-border-soft)", background: "var(--c-surface)", color: "#B5451B", fontWeight: 600, cursor: "pointer" }}>
+                  <IconTrash size={12} style={{ verticalAlign: -1, marginRight: 3 }} /> Supprimer
+                </button>
               </div>
             )}
           </div>
@@ -6837,18 +7093,23 @@ function App() {
 
   // Le bénévole/citoyen à l'origine d'un signalement est sur le terrain et sait en temps réel
   // si le problème a été traité ou non : il peut donc basculer lui-même le statut de SES PROPRES
-  // signalements (identifiés par device_id), sans passer par l'admin.
-  // Défense en profondeur : la vérification device_id ci-dessous est côté client uniquement.
-  // Une politique RLS côté serveur (table "signalements") doit exister pour n'autoriser la
-  // mise à jour de la colonne "statut" que lorsque device_id = auteur — sinon n'importe quel
-  // appareil pourrait, en théorie, rejouer la requête pour un signalement qui n'est pas le sien.
+  // signalements, sans passer par l'admin.
+  // Sécurité : contrairement à une première version qui ne comparait qu'un device_id (visible de
+  // tous dans le flux public, donc usurpable), la mise à jour est signée avec la vraie session
+  // Supabase anonyme de l'appareil (ensureDeviceSession) — la policy RLS "signalements" vérifie
+  // côté serveur que citoyen_id = auth.uid() de cette session avant d'autoriser l'écriture.
   async function citoyenBasculerStatutSignalement(signalement) {
     if (!signalement || signalement.device_id !== DEVICE_ID) return;
+    const session = await ensureDeviceSession();
+    if (!session) {
+      alert("Impossible de vérifier ton identité pour le moment (connexion, ou fonctionnalité pas encore activée côté serveur). Réessaie plus tard.");
+      return;
+    }
     const next = signalement.statut === "resolu" ? "attente" : "resolu";
     const clear = next === "resolu" ? { resolved_at: new Date().toISOString() } : { resolution_organisme: null, resolution_action: null, resolved_at: null };
     const precedent = signalement;
     setSignalements(prev => prev.map(s => s.id === signalement.id ? { ...s, statut: next, ...clear } : s));
-    const { data, error } = await supabase.from("signalements").update({ statut: next, ...clear }).eq("id", signalement.id).headers({ "x-device-id": DEVICE_ID }).select();
+    const { data, error } = await supabase.from("signalements").update({ statut: next, ...clear }).eq("id", signalement.id).headers({ Authorization: "Bearer " + session.access_token }).select();
     if (error || !data || data.length === 0) {
       setSignalements(prev => prev.map(s => s.id === signalement.id ? precedent : s));
       alert("Action refusée par le serveur. Réessaie une fois de retour en ligne, ou contacte un administrateur si le problème persiste.");
@@ -6977,6 +7238,9 @@ function App() {
   }
 
   useEffect(() => { chargerDonneesPrincipales(); }, []);
+  // Amorce la session anonyme d'appareil dès le démarrage (plutôt qu'au premier clic) pour
+  // qu'elle soit déjà prête quand l'utilisateur signale un problème ou change un statut.
+  useEffect(() => { ensureDeviceSession(); }, []);
 
   async function uploadPhoto(dataUrl, prefix) {
     if (!dataUrl) return null;
@@ -7020,15 +7284,23 @@ function App() {
       }
     }
     const { photo, ...toInsert } = s;
+    // Si cet appareil est inscrit comme bénévole, on accompagne le signalement de ses
+    // renseignements (nom, contact, pays, ville, quartier) pour donner du contexte à qui le traite.
+    const bi = getBenevoleInfo();
+    const benevoleFields = bi ? { benevole_id: bi.id || null, benevole_nom: bi.nom || null, benevole_contact: bi.contact || null, benevole_pays: bi.pays || null, benevole_ville: bi.ville || null, benevole_quartier: bi.quartier || null } : {};
     if (!opts.isReplay && !navigator.onLine) {
       const tempId = enqueuePendingAction("signalement", s);
       setPendingQueueCount(loadPendingQueue().length);
-      setSignalements(prev => [...prev, { ...toInsert, id: tempId, photo_url: photo || null, device_id: DEVICE_ID, date: new Date().toLocaleDateString("fr-FR") + " " + new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }), _pending: true }]);
+      setSignalements(prev => [...prev, { ...toInsert, ...benevoleFields, id: tempId, photo_url: photo || null, device_id: DEVICE_ID, date: new Date().toLocaleDateString("fr-FR") + " " + new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }), _pending: true }]);
       return;
     }
     try {
       const photo_url = await uploadPhoto(photo, "signalements");
-      const { data, error } = await supabase.from("signalements").insert({ ...toInsert, photo_url, device_id: DEVICE_ID, is_deleted: false }).select().single();
+      const session = await ensureDeviceSession();
+      const { data, error } = await supabase.from("signalements")
+        .insert({ ...toInsert, ...benevoleFields, photo_url, device_id: DEVICE_ID, citoyen_id: session ? session.user.id : null, is_deleted: false })
+        .headers(session ? { Authorization: "Bearer " + session.access_token } : {})
+        .select().single();
       if (error) throw error;
       setSignalements(prev => {
         const withoutPending = opts.tempId ? prev.filter(x => x.id !== opts.tempId) : prev;
@@ -7049,7 +7321,7 @@ function App() {
       if (opts.isReplay) { throw e; }
       const tempId = enqueuePendingAction("signalement", s);
       setPendingQueueCount(loadPendingQueue().length);
-      setSignalements(prev => [...prev, { ...toInsert, id: tempId, photo_url: photo || null, device_id: DEVICE_ID, date: new Date().toLocaleDateString("fr-FR") + " " + new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }), _pending: true }]);
+      setSignalements(prev => [...prev, { ...toInsert, ...benevoleFields, id: tempId, photo_url: photo || null, device_id: DEVICE_ID, date: new Date().toLocaleDateString("fr-FR") + " " + new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }), _pending: true }]);
       alert("Pas de connexion : ton signalement a été enregistré sur l'appareil et sera envoyé automatiquement dès que le réseau reviendra.");
     }
   }
