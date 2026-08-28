@@ -989,7 +989,10 @@ const supabase = {
           body: JSON.stringify(body),
         });
         const json = await res.json().catch(() => ({}));
-        if (!res.ok) return { error: { message: json.error_description || json.msg || "Erreur d'inscription." } };
+        if (!res.ok) {
+          const detail = json.error_description || json.msg || json.error || json.error_code || json.code;
+          return { error: { message: (detail ? String(detail) : `Erreur d'inscription (HTTP ${res.status}).`), status: res.status, code: json.error_code || json.code } };
+        }
         if (json.access_token) {
           const session = { access_token: json.access_token, refresh_token: json.refresh_token, user: json.user };
           persistSession(session);
@@ -4050,23 +4053,38 @@ function OrganisationCard({ lang, organisationStatut }) {
     if (defisChoisis.length === 0) { setErreur("Choisis au moins un défi environnemental."); return; }
 
     setBusy(true);
+    // Vérification préalable du code AVANT toute tentative de création de compte : GoTrue ne
+    // renvoie pas le message précis d'une exception levée par le déclencheur (juste un "Database
+    // error saving new user" générique), donc on préfère détecter un code déjà pris ici, avec un
+    // message clair, plutôt que de laisser échouer l'inscription pour s'en apercevoir après coup.
+    const { data: dispo, error: errCode } = await supabase.rpc("organisation_code_disponible", { p_code: codeInscription.trim() });
+    if (errCode) { setBusy(false); setErreur("Impossible de vérifier le code pour le moment. Vérifie ta connexion et réessaie."); return; }
+    if (dispo === false) { setBusy(false); setErreur("Ce code d'inscription est déjà utilisé par une autre organisation. Choisis-en un autre."); return; }
+    // Le compte Auth et la ligne "organisations" sont créés dans LA MÊME opération côté serveur
+    // (déclencheur sur auth.users) plutôt qu'en deux appels séparés : avec deux appels, un code
+    // déjà pris faisait échouer le 2e (l'insert organisations) alors que le 1er (auth.signUp)
+    // avait déjà réussi — laissant un compte Auth orphelin, sans ligne organisation, qui bloquait
+    // ensuite toute nouvelle tentative avec le même e-mail. Ici, si le code est déjà pris, le
+    // déclencheur fait échouer toute la transaction : aucun compte n'est créé, et on peut
+    // simplement corriger le code et réessayer avec le même e-mail.
     const { error: errSignUp } = await supabase.auth.signUp({
       email: email.trim(), password,
-      options: { data: { nom_organisation: nom.trim(), type_compte: "organisation" } },
+      options: { data: {
+        type_compte: "organisation", nom_organisation: nom.trim(), nom: nom.trim(), type, pays: pays || null, ville: ville || null,
+        description: description.trim() || null, numero_enregistrement: numeroEnregistrement.trim() || null,
+        code_inscription: codeInscription.trim().toUpperCase(), defis: defisChoisis,
+      } },
     });
-    if (errSignUp) { setBusy(false); setErreur(errSignUp.message || "Impossible de créer le compte."); return; }
-
-    const { error } = await supabase.from("organisations").insert({
-      type, nom: nom.trim(), email: email.trim(), pays: pays || null, ville: ville || null,
-      description: description.trim() || null, numero_enregistrement: type === "ong" ? (numeroEnregistrement.trim() || null) : null,
-      code_inscription: codeInscription.trim().toUpperCase(), defis: defisChoisis, statut: "en_attente",
-    }).returning(false);
     setBusy(false);
-    if (error) {
-      const dup = error.message && /duplicate|unique/i.test(error.message);
+    if (errSignUp) {
+      const msg = errSignUp.message || "";
+      const dup = /duplicate|unique|code_deja_utilise/i.test(msg);
+      const dejaInscrit = /already registered|already exists|user_already_exists/i.test(msg);
       setErreur(dup
         ? "Ce code d'inscription est déjà utilisé par une autre organisation. Choisis-en un autre."
-        : "Le compte a été créé mais l'inscription de l'organisation a échoué : " + (error.message || "erreur inconnue"));
+        : dejaInscrit
+        ? "Cette adresse e-mail est déjà associée à un compte. Connecte-toi plutôt, ou utilise une autre adresse."
+        : (msg || "Impossible de créer le compte."));
       return;
     }
     setDone(true);
@@ -4127,7 +4145,7 @@ function OrganisationCard({ lang, organisationStatut }) {
         <form onSubmit={inscrire}>
           <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
             {[["ong", "ONG"], ["gouvernement", "Gouvernement"]].map(([id, label]) => (
-              <button key={id} type="button" onClick={() => { setType(id); if (id !== "ong") setNumeroEnregistrement(""); }} style={{
+              <button key={id} type="button" onClick={() => setType(id)} style={{
                 flex: 1, padding: "9px 0", borderRadius: 10, fontSize: 12.5, fontWeight: 600, cursor: "pointer",
                 border: type === id ? "2px solid var(--c-accent)" : "1px solid var(--c-border)",
                 background: type === id ? "var(--c-surface-soft)" : "var(--c-surface)", color: type === id ? "var(--c-accent)" : "var(--c-text-secondary)" }}>{label}</button>
