@@ -4855,7 +4855,7 @@ const ORGANISME_OPTIONS = [
 ];
 const ORGANISME_LABELS = Object.fromEntries(ORGANISME_OPTIONS.map(o => [o.id, o.label]));
 
-function AdminSpace({ signalements, arbres, onUpdateStatut, onResolve, onValidate, onValidateArbre, onDelete, onSoftDeleteArbre, onRevertModeration, onSoftDeleteSignalement, onRestaurerItem, onRafraichir, rafraichissementEnCours, onExit }) {
+function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, onResolve, onValidate, onValidateArbre, onDelete, onSoftDeleteArbre, onRevertModeration, onSoftDeleteSignalement, onRestaurerItem, onRafraichir, rafraichissementEnCours, onExit }) {
   const [session, setSession] = useState(null);
   const [isAdmin, setIsAdmin] = useState(null); // null = en cours de vérification
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
@@ -4870,6 +4870,32 @@ function AdminSpace({ signalements, arbres, onUpdateStatut, onResolve, onValidat
   const [recoveryToken, setRecoveryToken] = useState(null);
   const [welcomeSession, setWelcomeSession] = useState(false); // true = vient de cliquer le lien reçu par e-mail
   const [newPassword, setNewPassword] = useState("");
+  // Le flux public/partagé (carte, accueil) passe désormais par une vue restreinte qui masque
+  // des champs sensibles (citoyen_id, coordonnées de bénévoles, notes de modération...). L'admin,
+  // authentifié, a le droit de tout voir : on recharge donc ici sa propre copie complète depuis la
+  // table brute plutôt que de dépendre du flux public déjà filtré en amont.
+  const [signalementsAdmin, setSignalementsAdmin] = useState(null);
+  async function chargerSignalementsAdmin() {
+    const { data } = await supabase.from("signalements").select("*").order("created_at", { ascending: false }).limit(2000);
+    if (data) setSignalementsAdmin(data);
+  }
+  useEffect(() => { if (isAdmin) chargerSignalementsAdmin(); }, [isAdmin]);
+  // Les actions admin (valider/résoudre/supprimer…) mettent à jour l'état partagé de l'app de
+  // façon optimiste (setSignalements côté App). On répercute ces changements dans notre propre
+  // copie ici, en ne touchant que les champs communs — les champs admin-only (modération,
+  // bénévole, citoyen_id) absents de la vue publique restreinte sont préservés tels quels.
+  useEffect(() => {
+    if (signalementsAdmin === null || !signalementsProp) return;
+    setSignalementsAdmin(prev => {
+      const byId = new Map(prev.map(s => [s.id, s]));
+      signalementsProp.forEach(sp => {
+        const existing = byId.get(sp.id);
+        byId.set(sp.id, existing ? { ...existing, ...sp } : sp);
+      });
+      return Array.from(byId.values());
+    });
+  }, [signalementsProp]);
+  const signalements = signalementsAdmin !== null ? signalementsAdmin : (signalementsProp || []);
 
   useEffect(() => {
     const hash = window.location.hash || "";
@@ -5230,7 +5256,7 @@ function AdminSpace({ signalements, arbres, onUpdateStatut, onResolve, onValidat
       {panel === "signalements" && (
         <>
           <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
-            <button onClick={onRafraichir} disabled={rafraichissementEnCours} style={{
+            <button onClick={() => { onRafraichir(); chargerSignalementsAdmin(); }} disabled={rafraichissementEnCours} style={{
               display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 20, fontSize: 11.5, fontWeight: 600,
               border: "1px solid var(--c-border)", background: "var(--c-surface)", color: "var(--c-text-secondary)", cursor: rafraichissementEnCours ? "default" : "pointer" }}>
               <IconClock size={13} /> {rafraichissementEnCours ? "Actualisation…" : "Actualiser"}
@@ -7230,7 +7256,7 @@ function App() {
     setRafraichissementEnCours(true);
     try {
       const [{ data: sigs }, { data: trees }, { data: news }, { data: obs }, { data: suiv }] = await Promise.all([
-        supabase.from("signalements").select("*").eq("is_deleted", false).order("created_at", { ascending: false }).limit(300),
+        supabase.from("signalements_public").select("*").order("created_at", { ascending: false }).limit(300),
         supabase.from("arbres").select("*").eq("is_deleted", false).order("created_at", { ascending: false }).limit(300),
         supabase.from("actualites").select("*").order("created_at", { ascending: false }).limit(20),
         supabase.from("observations").select("*").order("created_at", { ascending: false }).limit(200),
