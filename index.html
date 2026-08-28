@@ -1025,8 +1025,81 @@ const supabase = {
         return { data: { user: json }, error: null };
       } catch (e) { return { error: { message: e.message } }; }
     },
+    // ===== Double authentification (2FA / TOTP) =====
+    // Utilise directement les endpoints MFA de GoTrue (compatibles avec supabase-js) : l'inscription
+    // d'un facteur nécessite une session déjà active (mot de passe déjà vérifié) ; la vérification
+    // d'un challenge élève ensuite le niveau d'assurance de la session (claim "aal" du JWT : aal1 →
+    // aal2) et renouvelle les tokens.
+    mfa: {
+      async enroll({ factorType = "totp", friendlyName } = {}) {
+        try {
+          const res = await fetch(`${AUTH_URL}/factors`, {
+            method: "POST",
+            headers: { apikey: SUPABASE_KEY, Authorization: "Bearer " + (currentSession && currentSession.access_token), "Content-Type": "application/json" },
+            body: JSON.stringify({ factor_type: factorType, friendly_name: friendlyName }),
+          });
+          const json = await res.json().catch(() => ({}));
+          if (!res.ok) return { data: null, error: { message: json.error_description || json.msg || json.message || "Erreur d'activation de la double authentification." } };
+          return { data: json, error: null };
+        } catch (e) { return { data: null, error: { message: e.message } }; }
+      },
+      async challenge({ factorId }) {
+        try {
+          const res = await fetch(`${AUTH_URL}/factors/${factorId}/challenge`, {
+            method: "POST",
+            headers: { apikey: SUPABASE_KEY, Authorization: "Bearer " + (currentSession && currentSession.access_token), "Content-Type": "application/json" },
+          });
+          const json = await res.json().catch(() => ({}));
+          if (!res.ok) return { data: null, error: { message: json.error_description || json.msg || json.message || "Erreur lors de la demande de code." } };
+          return { data: json, error: null };
+        } catch (e) { return { data: null, error: { message: e.message } }; }
+      },
+      // accessToken optionnel : lors du step-up post-connexion, la session courante n'est encore
+      // qu'au niveau aal1, on utilise donc explicitement ce token plutôt que currentSession (identique
+      // dans ce cas précis, gardé pour clarté et robustesse).
+      async verify({ factorId, challengeId, code, accessToken }) {
+        try {
+          const res = await fetch(`${AUTH_URL}/factors/${factorId}/verify`, {
+            method: "POST",
+            headers: { apikey: SUPABASE_KEY, Authorization: "Bearer " + (accessToken || (currentSession && currentSession.access_token)), "Content-Type": "application/json" },
+            body: JSON.stringify({ challenge_id: challengeId, code }),
+          });
+          const json = await res.json().catch(() => ({}));
+          if (!res.ok) return { data: null, error: { message: json.error_description || json.msg || json.message || "Code incorrect ou expiré." } };
+          if (json.access_token) {
+            const session = { access_token: json.access_token, refresh_token: json.refresh_token, user: json.user };
+            persistSession(session);
+            return { data: { session }, error: null };
+          }
+          return { data: json, error: null };
+        } catch (e) { return { data: null, error: { message: e.message } }; }
+      },
+      async unenroll({ factorId }) {
+        try {
+          const res = await fetch(`${AUTH_URL}/factors/${factorId}`, {
+            method: "DELETE",
+            headers: { apikey: SUPABASE_KEY, Authorization: "Bearer " + (currentSession && currentSession.access_token), "Content-Type": "application/json" },
+          });
+          const json = await res.json().catch(() => ({}));
+          if (!res.ok) return { data: null, error: { message: json.error_description || json.msg || json.message || "Erreur lors de la suppression." } };
+          return { data: json, error: null };
+        } catch (e) { return { data: null, error: { message: e.message } }; }
+      },
+    },
   },
 };
+
+// Décode le payload d'un JWT (base64url) pour lire son claim "aal" (Authenticator Assurance
+// Level : "aal1" = mot de passe seul, "aal2" = mot de passe + second facteur vérifié). Ne fait
+// aucune vérification de signature — usage limité à de l'affichage/contrôle de flux côté client,
+// jamais à une décision de sécurité qui devrait être re-vérifiée côté serveur (RLS Postgres via
+// auth.jwt()->>'aal', déjà le cas pour les policies Supabase sensibles).
+function decoderJwtPayload(token) {
+  try {
+    const b64 = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    return JSON.parse(decodeURIComponent(escape(atob(b64))));
+  } catch (e) { return null; }
+}
 
 function getDeviceId() {
   try {
@@ -4032,6 +4105,8 @@ function OrganisationCard({ lang, organisationStatut }) {
   const [loginPassword, setLoginPassword] = useState("");
   const [loginErreur, setLoginErreur] = useState("");
   const [loginBusy, setLoginBusy] = useState(false);
+  const [oublieBusy, setOublieBusy] = useState(false);
+  const [oublieMessage, setOublieMessage] = useState("");
 
   useEffect(() => {
     supabase.from("env_defis").select("id, nom").eq("statut", "publie").order("ordre", { ascending: true })
@@ -4098,6 +4173,16 @@ function OrganisationCard({ lang, organisationStatut }) {
     if (error) { setLoginErreur("E-mail ou mot de passe incorrect."); return; }
   }
 
+  async function motDePasseOublie(e) {
+    if (e && e.preventDefault) e.preventDefault();
+    setOublieMessage("");
+    if (!loginEmail.trim() || !loginEmail.includes("@")) { setOublieMessage("Entre d'abord ton adresse e-mail ci-dessus."); return; }
+    setOublieBusy(true);
+    const { error } = await supabase.auth.resetPasswordForEmail(loginEmail.trim());
+    setOublieBusy(false);
+    setOublieMessage(error ? (error.message || "Impossible d'envoyer l'e-mail pour le moment.") : "Un e-mail de réinitialisation a été envoyé si ce compte existe.");
+  }
+
   if (organisationStatut) {
     const info = ORGANISATION_STATUT_INFO[organisationStatut] || { label: organisationStatut, texte: "", couleur: "var(--c-text-muted)" };
     return (
@@ -4134,7 +4219,11 @@ function OrganisationCard({ lang, organisationStatut }) {
           <input required type="email" value={loginEmail} onChange={e => setLoginEmail(e.target.value)} placeholder="Adresse e-mail de l'organisation"
             style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
           <PasswordInput value={loginPassword} onChange={e => setLoginPassword(e.target.value)} placeholder="Mot de passe"
-            style={{ padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10 }} />
+            style={{ padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 6 }} />
+          <button type="button" onClick={motDePasseOublie} disabled={oublieBusy} style={{ display: "block", marginLeft: "auto", background: "none", border: "none", color: "var(--c-accent-dark)", fontSize: 11.5, fontWeight: 600, cursor: "pointer", padding: "2px 0 8px" }}>
+            {oublieBusy ? "…" : "Mot de passe oublié ?"}
+          </button>
+          {oublieMessage && <div role="status" style={{ fontSize: 12, color: "var(--c-text-secondary)", marginBottom: 10 }}>{oublieMessage}</div>}
           {loginErreur && <div role="alert" style={{ fontSize: 12, color: "#B5451B", marginBottom: 10 }}>{loginErreur}</div>}
           <button type="button" onClick={seConnecter} disabled={loginBusy} style={{ width: "100%", padding: "10px 0", borderRadius: 10, border: "none", background: "var(--c-accent-dark)", color: "#fff", fontWeight: 600, fontSize: 13, cursor: "pointer", marginBottom: 8 }}>
             {loginBusy ? "…" : "Se connecter"}
@@ -4822,13 +4911,13 @@ function NotifBell({ email, onNavigate }) {
   );
 }
 
-function PasswordInput({ value, onChange, placeholder, ariaLabel, style }) {
+function PasswordInput({ value, onChange, placeholder, ariaLabel, style, disabled }) {
   const [visible, setVisible] = useState(false);
   return (
     <div style={{ position: "relative", width: "100%" }}>
-      <input type={visible ? "text" : "password"} value={value} onChange={onChange} placeholder={placeholder} aria-label={ariaLabel || placeholder}
-        style={{ ...style, width: "100%", paddingRight: 40, boxSizing: "border-box" }} />
-      <button type="button" onClick={() => setVisible(!visible)} aria-label={visible ? "Masquer le mot de passe" : "Afficher le mot de passe"} style={{
+      <input type={visible ? "text" : "password"} value={value} onChange={onChange} placeholder={placeholder} aria-label={ariaLabel || placeholder} disabled={disabled}
+        style={{ ...style, width: "100%", paddingRight: 40, boxSizing: "border-box", opacity: disabled ? 0.6 : 1 }} />
+      <button type="button" onClick={() => setVisible(!visible)} aria-label={visible ? "Masquer le mot de passe" : "Afficher le mot de passe"} disabled={disabled} style={{
         position: "absolute", right: 4, top: "50%", transform: "translateY(-50%)", background: "none", border: "none",
         cursor: "pointer", color: "var(--c-text-muted)", padding: 8, display: "flex", alignItems: "center", justifyContent: "center" }}>
         {visible ? <IconEyeOff size={16} /> : <IconEye size={16} />}
@@ -4836,6 +4925,45 @@ function PasswordInput({ value, onChange, placeholder, ariaLabel, style }) {
     </div>
   );
 }
+
+// ===== Politique de mot de passe renforcée (comptes du Centre de contrôle uniquement) =====
+// Le Centre de contrôle donne accès à des données sensibles (identifiants d'appareils, notes de
+// modération, gestion des comptes bénévoles/organisations) : on exige donc ici un mot de passe
+// nettement plus robuste que celui des comptes citoyens/organisations (8 caractères). Cette
+// validation est côté client (UX + premier filtre) ; elle ne remplace pas une politique équivalente
+// configurée côté serveur (Supabase Auth → Authentication → Policies / mot de passe minimal, qui
+// doit être alignée sur ces mêmes règles pour empêcher un contournement via un appel direct à l'API).
+function evaluerForceMotDePasseAdmin(pw) {
+  const val = pw || "";
+  const regles = [
+    { id: "longueur", label: "12 caractères minimum", ok: val.length >= 12 },
+    { id: "maj", label: "Une majuscule", ok: /[A-Z]/.test(val) },
+    { id: "min", label: "Une minuscule", ok: /[a-z]/.test(val) },
+    { id: "chiffre", label: "Un chiffre", ok: /[0-9]/.test(val) },
+    { id: "special", label: "Un caractère spécial (!?#$%…)", ok: /[^A-Za-z0-9]/.test(val) },
+  ];
+  return { regles, valide: regles.every(r => r.ok) };
+}
+
+function ExigencesMotDePasseAdmin({ password }) {
+  const { regles } = evaluerForceMotDePasseAdmin(password);
+  return (
+    <div style={{ fontSize: 10.5, color: "var(--c-text-muted)", marginBottom: 10, display: "flex", flexDirection: "column", gap: 3 }}>
+      {regles.map(r => (
+        <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 5, color: r.ok ? "var(--c-accent)" : "var(--c-text-muted)" }}>
+          {r.ok ? <IconCheck size={11} /> : <span style={{ width: 11, display: "inline-block", textAlign: "center" }}>•</span>} {r.label}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Nombre maximal de tentatives de connexion échouées avant verrouillage temporaire côté client,
+// et durée du verrouillage. Ceci décourage un enchaînement rapide de tentatives locales mais ne
+// remplace pas une limitation réelle côté serveur (Supabase applique déjà ses propres limites de
+// débit sur /auth/v1/token, indépendantes de ce compteur).
+const ADMIN_LOGIN_MAX_TENTATIVES = 5;
+const ADMIN_LOGIN_VERROUILLAGE_MS = 60000;
 
 const MOTIF_LABELS_ADMIN = { faux: "Faux signalement", doublon: "Doublon", spam: "Spam", erreur_localisation: "Erreur de localisation" };
 const MOTIF_OPTIONS_ADMIN = [
@@ -4870,6 +4998,30 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
   const [recoveryToken, setRecoveryToken] = useState(null);
   const [welcomeSession, setWelcomeSession] = useState(false); // true = vient de cliquer le lien reçu par e-mail
   const [newPassword, setNewPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
+  // Verrouillage local après plusieurs échecs de connexion successifs (voir constantes
+  // ADMIN_LOGIN_MAX_TENTATIVES / ADMIN_LOGIN_VERROUILLAGE_MS ci-dessus).
+  const [tentativesEchouees, setTentativesEchouees] = useState(0);
+  const [verrouJusqua, setVerrouJusqua] = useState(null);
+  const [maintenant, setMaintenant] = useState(Date.now());
+  useEffect(() => {
+    if (!verrouJusqua) return;
+    const id = setInterval(() => setMaintenant(Date.now()), 500);
+    return () => clearInterval(id);
+  }, [verrouJusqua]);
+  const secondesRestantes = verrouJusqua ? Math.max(0, Math.ceil((verrouJusqua - maintenant) / 1000)) : 0;
+  const estVerrouille = verrouJusqua !== null && secondesRestantes > 0;
+  useEffect(() => { if (verrouJusqua && secondesRestantes === 0) { setVerrouJusqua(null); setTentativesEchouees(0); } }, [secondesRestantes, verrouJusqua]);
+
+  // ===== Double authentification (2FA) : step-up post-connexion =====
+  // Après un signInWithPassword réussi, la session est au niveau aal1. Si le compte a déjà un
+  // facteur TOTP vérifié, on exige un code avant de laisser passer vers le tableau de bord (accès
+  // à des données sensibles). "session" ci-dessous n'est pas encore déclaré à cet endroit du
+  // composant (défini plus bas) : ces états seront réutilisés depuis le rendu, où "session" existe.
+  const [mfaChallenge, setMfaChallenge] = useState(null); // { factorId, challengeId }
+  const [mfaCode, setMfaCode] = useState("");
+  const [mfaBusy, setMfaBusy] = useState(false);
+  const [mfaError, setMfaError] = useState("");
   // Le flux public/partagé (carte, accueil) passe désormais par une vue restreinte qui masque
   // des champs sensibles (citoyen_id, coordonnées de bénévoles, notes de modération...). L'admin,
   // authentifié, a le droit de tout voir : on recharge donc ici sa propre copie complète depuis la
@@ -4930,6 +5082,34 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
     return () => sub.subscription.unsubscribe();
   }, []);
 
+  // Niveau d'assurance de la session courante et présence d'un facteur TOTP déjà vérifié sur le
+  // compte. Tant que aal2 n'est pas atteint alors qu'un facteur existe, on bloque l'accès au
+  // tableau de bord (voir écran de step-up plus bas) — y compris la vérification des droits admin,
+  // qui ne doit pas s'exécuter avant que la double authentification soit validée.
+  const aal = session && session.access_token ? (decoderJwtPayload(session.access_token) || {}).aal : null;
+  const facteursTotpVerifies = (session && session.user && session.user.factors) ? session.user.factors.filter(f => f.factor_type === "totp" && f.status === "verified") : [];
+  const mfaStepUpRequis = !!session && aal === "aal1" && facteursTotpVerifies.length > 0;
+
+  useEffect(() => {
+    if (!mfaStepUpRequis || mfaChallenge) return;
+    const factorId = facteursTotpVerifies[0].id;
+    setMfaError("");
+    supabase.auth.mfa.challenge({ factorId }).then(({ data, error }) => {
+      if (error) { setMfaError(error.message); return; }
+      setMfaChallenge({ factorId, challengeId: data.id });
+    });
+  }, [mfaStepUpRequis]);
+
+  async function verifierCodeMfa(e) {
+    if (e && e.preventDefault) e.preventDefault();
+    if (!mfaChallenge) return;
+    setMfaError(""); setMfaBusy(true);
+    const { error } = await supabase.auth.mfa.verify({ factorId: mfaChallenge.factorId, challengeId: mfaChallenge.challengeId, code: mfaCode.trim(), accessToken: session.access_token });
+    setMfaBusy(false);
+    if (error) { setMfaError("Code incorrect ou expiré."); return; }
+    setMfaCode(""); setMfaChallenge(null);
+  }
+
   useEffect(() => {
     if (!session) { setIsAdmin(null); setIsSuperAdmin(false); return; }
     supabase.from("admins").select("email, role").eq("email", session.user.email).maybeSingle()
@@ -4948,23 +5128,30 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
 
   async function handleSetNewPassword(e) {
     if (e && e.preventDefault) e.preventDefault();
-    setError(""); setBusy(true);
+    setError("");
+    if (!evaluerForceMotDePasseAdmin(newPassword).valide) { setError("Le mot de passe ne respecte pas toutes les exigences ci-dessous."); return; }
+    if (newPassword !== confirmNewPassword) { setError("Les deux mots de passe ne correspondent pas."); return; }
+    setBusy(true);
     const { error } = await supabase.auth.updateUser({ password: newPassword }, recoveryToken);
     setBusy(false);
     if (error) { setError(error.message); return; }
     setRecoveryToken(null);
+    setNewPassword(""); setConfirmNewPassword("");
     window.location.hash = "";
     setError("Mot de passe mis à jour. Connecte-toi avec ton nouveau mot de passe.");
   }
 
   async function handleChooseWelcomePassword(e) {
     if (e && e.preventDefault) e.preventDefault();
-    setError(""); setBusy(true);
+    setError("");
+    if (!evaluerForceMotDePasseAdmin(newPassword).valide) { setError("Le mot de passe ne respecte pas toutes les exigences ci-dessous."); return; }
+    if (newPassword !== confirmNewPassword) { setError("Les deux mots de passe ne correspondent pas."); return; }
+    setBusy(true);
     const { error } = await supabase.auth.updateUser({ password: newPassword }, session.access_token);
     setBusy(false);
     if (error) { setError(error.message); return; }
     setWelcomeSession(false);
-    setNewPassword("");
+    setNewPassword(""); setConfirmNewPassword("");
   }
 
   async function handleForgot(e) {
@@ -5000,13 +5187,20 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
   async function handleAuth(e) {
     if (e && e.preventDefault) e.preventDefault();
     setError("");
+    if (mode === "login" && estVerrouille) {
+      setError(`Trop de tentatives échouées. Réessaie dans ${secondesRestantes}s.`);
+      return;
+    }
     if (!email.trim() || !email.includes("@")) { setError("Entre une adresse e-mail valide."); return; }
-    if (!password || password.length < 8) { setError("Le mot de passe doit contenir au moins 8 caractères."); return; }
+    if (!password) { setError("Entre ton mot de passe."); return; }
     setBusy(true);
     try {
       if (mode === "login") {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
+        // Connexion réussie : on réinitialise le compteur d'échecs.
+        setTentativesEchouees(0);
+        setVerrouJusqua(null);
         try {
           if (typeof Notification !== "undefined" && Notification.permission !== "denied") {
             const perm = await Notification.requestPermission();
@@ -5022,7 +5216,20 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
       }
     } catch (err) {
       const msg = (err && err.message) ? err.message : "Une erreur est survenue. Réessaie.";
-      setError(msg === "Invalid login credentials" ? "Identifiants incorrects." : msg);
+      if (mode === "login" && (msg === "Invalid login credentials" || /invalid/i.test(msg))) {
+        // Verrouillage local temporaire après plusieurs échecs successifs, en plus de la limite
+        // de débit déjà appliquée côté serveur par Supabase sur cet endpoint.
+        const n = tentativesEchouees + 1;
+        setTentativesEchouees(n);
+        if (n >= ADMIN_LOGIN_MAX_TENTATIVES) {
+          setVerrouJusqua(Date.now() + ADMIN_LOGIN_VERROUILLAGE_MS);
+          setError(`Trop de tentatives échouées. Réessaie dans ${Math.ceil(ADMIN_LOGIN_VERROUILLAGE_MS / 1000)}s.`);
+        } else {
+          setError(`Identifiants incorrects. (${ADMIN_LOGIN_MAX_TENTATIVES - n} tentative(s) avant verrouillage temporaire)`);
+        }
+      } else {
+        setError(msg === "Invalid login credentials" ? "Identifiants incorrects." : msg);
+      }
     } finally {
       setBusy(false);
     }
@@ -5062,9 +5269,15 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
         <SectionTitle sub="Choisis un nouveau mot de passe.">Réinitialisation</SectionTitle>
         <form onSubmit={handleSetNewPassword} style={{ background: "var(--c-surface)", borderRadius: 14, padding: 16, border: "1px solid var(--c-border)" }}>
           <PasswordInput value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="Nouveau mot de passe"
-            style={{ padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10 }} />
+            style={{ padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8 }} />
+          <PasswordInput value={confirmNewPassword} onChange={e => setConfirmNewPassword(e.target.value)} placeholder="Confirme le nouveau mot de passe"
+            style={{ padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8 }} />
+          <ExigencesMotDePasseAdmin password={newPassword} />
           {error && <div role="alert" style={{ fontSize: 12, color: error.startsWith("Mot de passe mis") ? "var(--c-accent)" : "#B5451B", marginBottom: 10 }}>{error}</div>}
-          <button type="submit" disabled={busy} style={{ width: "100%", padding: "11px 0", borderRadius: 10, border: "none", background: "var(--c-accent-dark)", color: "#fff", fontWeight: 600, fontSize: 13.5, cursor: "pointer" }}>
+          <button type="submit" disabled={busy || !evaluerForceMotDePasseAdmin(newPassword).valide || newPassword !== confirmNewPassword} style={{
+            width: "100%", padding: "11px 0", borderRadius: 10, border: "none",
+            background: (!evaluerForceMotDePasseAdmin(newPassword).valide || newPassword !== confirmNewPassword) ? "var(--c-text-faint)" : "var(--c-accent-dark)",
+            color: "#fff", fontWeight: 600, fontSize: 13.5, cursor: (!evaluerForceMotDePasseAdmin(newPassword).valide || newPassword !== confirmNewPassword) ? "default" : "pointer" }}>
             {busy ? "..." : "Enregistrer le nouveau mot de passe"}
           </button>
         </form>
@@ -5080,15 +5293,40 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
           <div style={{ fontSize: 13, color: "var(--c-text-secondary)", marginBottom: 12, lineHeight: 1.5 }}>
             Ton adresse est confirmée. Choisis maintenant un mot de passe pour ton compte administrateur.
           </div>
-          <PasswordInput value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="Choisis un mot de passe (8 caractères min.)"
-            style={{ padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10 }} />
+          <PasswordInput value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="Choisis un mot de passe"
+            style={{ padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8 }} />
+          <PasswordInput value={confirmNewPassword} onChange={e => setConfirmNewPassword(e.target.value)} placeholder="Confirme le mot de passe"
+            style={{ padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8 }} />
+          <ExigencesMotDePasseAdmin password={newPassword} />
           {error && <div role="alert" style={{ fontSize: 12, color: "#B5451B", marginBottom: 10 }}>{error}</div>}
-          <button type="submit" disabled={busy || newPassword.length < 8} style={{
+          <button type="submit" disabled={busy || !evaluerForceMotDePasseAdmin(newPassword).valide || newPassword !== confirmNewPassword} style={{
             width: "100%", padding: "11px 0", borderRadius: 10, border: "none",
-            background: newPassword.length < 8 ? "var(--c-text-faint)" : "var(--c-accent-dark)", color: "#fff", fontWeight: 600, fontSize: 13.5,
-            cursor: newPassword.length < 8 ? "default" : "pointer" }}>
+            background: (!evaluerForceMotDePasseAdmin(newPassword).valide || newPassword !== confirmNewPassword) ? "var(--c-text-faint)" : "var(--c-accent-dark)",
+            color: "#fff", fontWeight: 600, fontSize: 13.5,
+            cursor: (!evaluerForceMotDePasseAdmin(newPassword).valide || newPassword !== confirmNewPassword) ? "default" : "pointer" }}>
             {busy ? "..." : "Activer mon compte"}
           </button>
+        </form>
+      </Screen>
+    );
+  }
+
+  if (mfaStepUpRequis) {
+    return (
+      <Screen>
+        <SectionTitle sub="Entre le code généré par ton application d'authentification.">Double authentification</SectionTitle>
+        <form onSubmit={verifierCodeMfa} style={{ background: "var(--c-surface)", borderRadius: 14, padding: 16, border: "1px solid var(--c-border)" }}>
+          <input inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={mfaCode} onChange={e => setMfaCode(e.target.value.replace(/\D/g, ""))}
+            placeholder="Code à 6 chiffres" aria-label="Code de double authentification"
+            style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 18, letterSpacing: 4, textAlign: "center", marginBottom: 10, boxSizing: "border-box" }} />
+          {mfaError && <div role="alert" style={{ fontSize: 12, color: "#B5451B", marginBottom: 10 }}>{mfaError}</div>}
+          <button type="submit" disabled={mfaBusy || mfaCode.length !== 6 || !mfaChallenge} style={{
+            width: "100%", padding: "11px 0", borderRadius: 10, border: "none",
+            background: (mfaCode.length !== 6 || !mfaChallenge) ? "var(--c-text-faint)" : "var(--c-accent-dark)", color: "#fff", fontWeight: 600, fontSize: 13.5,
+            cursor: (mfaCode.length !== 6 || !mfaChallenge) ? "default" : "pointer", marginBottom: 8 }}>
+            {mfaBusy ? "..." : "Valider"}
+          </button>
+          <button type="button" onClick={handleLogout} style={{ width: "100%", background: "none", border: "none", color: "var(--c-text-secondary)", fontSize: 12, cursor: "pointer", padding: 6 }}>← Annuler et se déconnecter</button>
         </form>
       </Screen>
     );
@@ -5137,14 +5375,22 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
         <form onSubmit={handleAuth} style={{ background: "var(--c-surface)", borderRadius: 14, padding: 16, border: "1px solid var(--c-border)" }}>
           <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="Adresse e-mail" aria-label="Adresse e-mail"
             style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
-          <PasswordInput value={password} onChange={e => setPassword(e.target.value)} placeholder="Mot de passe"
+          <PasswordInput value={password} onChange={e => setPassword(e.target.value)} placeholder="Mot de passe" disabled={estVerrouille}
             style={{ padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 6 }} />
           <button type="button" onClick={() => { setMode("forgot"); setError(""); }} style={{ background: "none", border: "none", color: "var(--c-text-muted)", fontSize: 11.5, cursor: "pointer", padding: 0, marginBottom: 10, display: "block" }}>
             Mot de passe oublié ?
           </button>
-          {error && <div role="alert" style={{ fontSize: 12, color: "#B5451B", marginBottom: 10 }}>{error}</div>}
-          <button type="submit" disabled={busy} style={{ width: "100%", padding: "11px 0", borderRadius: 10, border: "none", background: "var(--c-accent-dark)", color: "#fff", fontWeight: 600, fontSize: 13.5, cursor: "pointer", marginBottom: 8 }}>
-            {busy ? "..." : "Se connecter"}
+          {estVerrouille && (
+            <div role="alert" style={{ fontSize: 12, color: "var(--c-warning-text)", background: "var(--c-warning-bg)", borderRadius: 10, padding: "9px 12px", marginBottom: 10 }}>
+              Trop de tentatives échouées. Réessaie dans {secondesRestantes}s.
+            </div>
+          )}
+          {!estVerrouille && error && <div role="alert" style={{ fontSize: 12, color: "#B5451B", marginBottom: 10 }}>{error}</div>}
+          <button type="submit" disabled={busy || estVerrouille} style={{
+            width: "100%", padding: "11px 0", borderRadius: 10, border: "none",
+            background: estVerrouille ? "var(--c-text-faint)" : "var(--c-accent-dark)", color: "#fff", fontWeight: 600, fontSize: 13.5,
+            cursor: estVerrouille ? "default" : "pointer", marginBottom: 8 }}>
+            {busy ? "..." : estVerrouille ? `Réessaie dans ${secondesRestantes}s` : "Se connecter"}
           </button>
           <button type="button" onClick={() => { setMode("signup"); setError(""); }} style={{ width: "100%", background: "none", border: "none", color: "var(--c-text-secondary)", fontSize: 12, cursor: "pointer", padding: 6 }}>
             Pas encore de compte admin ? En créer un
@@ -5414,7 +5660,7 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
       {panel === "benevoles" && <AdminBenevoles />}
 
       {panel === "historique" && <AdminHistorique isSuperAdmin={isSuperAdmin} onRestaurerItem={onRestaurerItem} />}
-      {panel === "securite" && <AdminSecurite />}
+      {panel === "securite" && <AdminSecurite session={session} />}
       {panel === "contenu_env" && <AdminContenuEnv isSuperAdmin={isSuperAdmin} adminEmail={session.user.email} />}
       {panel === "organisations" && <AdminOrganisations isSuperAdmin={isSuperAdmin} adminEmail={session.user.email} />}
       {panel === "rapports" && <AdminRapports signalements={signalements} arbres={arbres} isSuperAdmin={isSuperAdmin} centreVerrouille={centreVerrouille} onToggleCentre={toggleCentreVerrouille} />}
@@ -6301,7 +6547,135 @@ function detecterActiviteSuspecte(evenements) {
   return alertes.sort((a, b) => new Date(b.date) - new Date(a.date));
 }
 
-function AdminSecurite() {
+function AdminMfaPanel({ session }) {
+  const facteurs = (session && session.user && session.user.factors) || [];
+  const facteurVerifie = facteurs.find(f => f.factor_type === "totp" && f.status === "verified");
+  const [enrolement, setEnrolement] = useState(null); // { id, totp: { qr_code, secret, uri } }
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [erreur, setErreur] = useState("");
+  const [message, setMessage] = useState("");
+  const [confirmSuppr, setConfirmSuppr] = useState(false);
+
+  async function demarrerEnrolement() {
+    setErreur(""); setMessage(""); setBusy(true);
+    const { data, error } = await supabase.auth.mfa.enroll({ factorType: "totp", friendlyName: "Authenticator" });
+    setBusy(false);
+    if (error) { setErreur(error.message); return; }
+    setEnrolement(data);
+  }
+
+  async function confirmerEnrolement(e) {
+    if (e && e.preventDefault) e.preventDefault();
+    if (!enrolement) return;
+    setErreur(""); setBusy(true);
+    const { data: chal, error: errChal } = await supabase.auth.mfa.challenge({ factorId: enrolement.id });
+    if (errChal) { setBusy(false); setErreur(errChal.message); return; }
+    const { error: errVerif } = await supabase.auth.mfa.verify({ factorId: enrolement.id, challengeId: chal.id, code: code.trim() });
+    setBusy(false);
+    if (errVerif) { setErreur("Code incorrect. Vérifie l'heure de ton appareil et réessaie."); return; }
+    setEnrolement(null); setCode("");
+    setMessage("Double authentification activée. Elle sera demandée à chaque connexion.");
+  }
+
+  async function annulerEnrolement() {
+    if (!enrolement) return;
+    await supabase.auth.mfa.unenroll({ factorId: enrolement.id });
+    setEnrolement(null); setCode(""); setErreur("");
+  }
+
+  async function supprimerFacteur() {
+    if (!facteurVerifie) return;
+    setBusy(true);
+    const { error } = await supabase.auth.mfa.unenroll({ factorId: facteurVerifie.id });
+    setBusy(false);
+    setConfirmSuppr(false);
+    if (error) { setErreur(error.message); return; }
+    setMessage("Double authentification désactivée pour ce compte.");
+  }
+
+  return (
+    <div style={{ background: "var(--c-surface)", borderRadius: 14, padding: 16, border: "1px solid var(--c-border)", marginBottom: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+        <IconLock size={16} color="var(--c-accent-dark)" />
+        <div style={{ fontFamily: "Fraunces, serif", fontSize: 14.5, fontWeight: 600, color: "var(--c-accent-dark)" }}>Double authentification (2FA)</div>
+      </div>
+      <div style={{ fontSize: 11.5, color: "var(--c-text-secondary)", lineHeight: 1.5, marginBottom: 10 }}>
+        Ajoute une couche de sécurité supplémentaire : en plus du mot de passe, un code à 6 chiffres généré
+        par une application d'authentification (Google Authenticator, Authy, 1Password…) sera demandé à
+        chaque connexion.
+      </div>
+
+      {message && <div style={{ fontSize: 12, color: "var(--c-accent)", marginBottom: 10 }}>{message}</div>}
+      {erreur && <div role="alert" style={{ fontSize: 12, color: "#B5451B", marginBottom: 10 }}>{erreur}</div>}
+
+      {facteurVerifie && !enrolement ? (
+        <>
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11.5, fontWeight: 700, color: "#fff", background: "var(--c-accent)", borderRadius: 999, padding: "4px 10px", marginBottom: 10 }}>
+            <IconCheck size={12} /> Activée
+          </div>
+          {!confirmSuppr ? (
+            <button onClick={() => setConfirmSuppr(true)} style={{ display: "block", padding: "8px 14px", borderRadius: 10, border: "1px solid var(--c-danger-border-soft)", background: "var(--c-surface)", color: "#B5451B", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>
+              Désactiver la double authentification
+            </button>
+          ) : (
+            <div>
+              <div style={{ fontSize: 12, color: "var(--c-text-secondary)", marginBottom: 8 }}>Confirme la désactivation : ton compte ne sera plus protégé que par le mot de passe.</div>
+              <button onClick={supprimerFacteur} disabled={busy} style={{ padding: "8px 14px", borderRadius: 10, border: "none", background: "#B5451B", color: "#fff", fontWeight: 600, fontSize: 12, cursor: "pointer", marginRight: 8 }}>
+                {busy ? "…" : "Confirmer la désactivation"}
+              </button>
+              <button onClick={() => setConfirmSuppr(false)} style={{ padding: "8px 14px", borderRadius: 10, border: "1px solid var(--c-border)", background: "var(--c-surface)", color: "var(--c-text-secondary)", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>
+                Annuler
+              </button>
+            </div>
+          )}
+        </>
+      ) : !enrolement ? (
+        <div style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11.5, fontWeight: 700, color: "var(--c-text-muted)", background: "var(--c-surface-soft)", borderRadius: 999, padding: "4px 10px", marginBottom: 10 }}>
+          Non activée
+        </div>
+      ) : null}
+
+      {!facteurVerifie && !enrolement && (
+        <button onClick={demarrerEnrolement} disabled={busy} style={{ display: "block", padding: "9px 14px", borderRadius: 10, border: "none", background: "var(--c-accent-dark)", color: "#fff", fontWeight: 600, fontSize: 12.5, cursor: "pointer" }}>
+          {busy ? "…" : "Activer la double authentification"}
+        </button>
+      )}
+
+      {enrolement && (
+        <form onSubmit={confirmerEnrolement}>
+          <div style={{ fontSize: 12, color: "var(--c-text-secondary)", marginBottom: 10 }}>
+            1. Scanne ce QR code avec ton application d'authentification (ou saisis la clé manuellement).<br />
+            2. Entre ensuite le code à 6 chiffres qu'elle affiche pour confirmer.
+          </div>
+          {enrolement.totp && enrolement.totp.qr_code && (
+            <div style={{ background: "#fff", borderRadius: 10, padding: 10, marginBottom: 10, display: "flex", justifyContent: "center" }}
+              dangerouslySetInnerHTML={{ __html: enrolement.totp.qr_code }} />
+          )}
+          {enrolement.totp && enrolement.totp.secret && (
+            <div style={{ fontSize: 11, color: "var(--c-text-muted)", marginBottom: 10, wordBreak: "break-all" }}>
+              Clé manuelle : <span style={{ fontFamily: "IBM Plex Mono, monospace" }}>{enrolement.totp.secret}</span>
+            </div>
+          )}
+          <input inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={code} onChange={e => setCode(e.target.value.replace(/\D/g, ""))}
+            placeholder="Code à 6 chiffres" aria-label="Code de confirmation"
+            style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 16, letterSpacing: 3, textAlign: "center", marginBottom: 10, boxSizing: "border-box" }} />
+          <button type="submit" disabled={busy || code.length !== 6} style={{
+            padding: "9px 14px", borderRadius: 10, border: "none",
+            background: code.length !== 6 ? "var(--c-text-faint)" : "var(--c-accent-dark)", color: "#fff", fontWeight: 600, fontSize: 12.5,
+            cursor: code.length !== 6 ? "default" : "pointer", marginRight: 8 }}>
+            {busy ? "…" : "Confirmer"}
+          </button>
+          <button type="button" onClick={annulerEnrolement} style={{ padding: "9px 14px", borderRadius: 10, border: "1px solid var(--c-border)", background: "var(--c-surface)", color: "var(--c-text-secondary)", fontWeight: 600, fontSize: 12.5, cursor: "pointer" }}>
+            Annuler
+          </button>
+        </form>
+      )}
+    </div>
+  );
+}
+
+function AdminSecurite({ session }) {
   const [evenements, setEvenements] = useState(null);
   const [erreur, setErreur] = useState(null);
 
@@ -6348,6 +6722,8 @@ function AdminSecurite() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <AdminMfaPanel session={session} />
+
       <div style={{ fontSize: 11.5, color: "var(--c-text-muted)", lineHeight: 1.5, marginBottom: 4 }}>
         Repérage de patterns anormaux dans les 300 dernières actions journalisées : rafales d'actions,
         suppressions groupées, activité hors horaires, compte au comportement destructeur dès sa
