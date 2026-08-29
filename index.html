@@ -4493,6 +4493,13 @@ function EspaceOrganisation({ organisationEmail, onBack }) {
   const [mesBenevoles, setMesBenevoles] = useState(null);
   const [benevolesDisponibles, setBenevolesDisponibles] = useState(null);
   const [busyAssign, setBusyAssign] = useState(null);
+  const [mesArbres, setMesArbres] = useState(null);
+  const [showFormArbre, setShowFormArbre] = useState(false);
+  const [nomArbre, setNomArbre] = useState("");
+  const [photoArbre, setPhotoArbre] = useState(null);
+  const [busyArbre, setBusyArbre] = useState(false);
+  const [erreurArbre, setErreurArbre] = useState("");
+  const fileArbreRef = useRef(null);
 
   // Un gouvernement garde ses pleins droits (accès non restreint, comme avant cette
   // fonctionnalité) ; une ONG doit d'abord s'assigner des bénévoles pour voir leurs signalements.
@@ -4512,11 +4519,18 @@ function EspaceOrganisation({ organisationEmail, onBack }) {
     setBenevolesDisponibles(tous.filter(b => b.organisation_id !== orgData.id));
   }
 
+  async function chargerArbres(orgData) {
+    if (!orgData) return;
+    const { data } = await supabase.from("arbres").select("*").eq("organisation_id", orgData.id).eq("is_deleted", false).order("created_at", { ascending: false });
+    setMesArbres(data || []);
+  }
+
   async function charger() {
     const { data: orgData } = await supabase.from("organisations").select("*").eq("email", organisationEmail).eq("is_deleted", false).order("created_at", { ascending: false }).limit(1).maybeSingle();
     if (!orgData) return;
     setOrg(orgData);
     chargerBenevoles(orgData);
+    chargerArbres(orgData);
     const [{ data: problemes }, { data: defis }] = await Promise.all([
       supabase.from("env_problemes").select("code, defi_id"),
       supabase.from("env_defis").select("id, nom").in("id", orgData.defis && orgData.defis.length ? orgData.defis : ["00000000-0000-0000-0000-000000000000"]),
@@ -4577,6 +4591,46 @@ function EspaceOrganisation({ organisationEmail, onBack }) {
     setMessageActu("Actualité publiée.");
   }
 
+  function handlePhotoArbre(e) {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = async () => setPhotoArbre(await compressImage(reader.result));
+    reader.readAsDataURL(f);
+  }
+
+  function planterArbreOrganisation() {
+    setErreurArbre("");
+    if (!nomArbre.trim()) { setErreurArbre("Le nom/l'essence de l'arbre est requis."); return; }
+    const finalize = async (lat, lng) => {
+      setBusyArbre(true);
+      try {
+        const photo_url = await uploadPhotoGeneric(photoArbre, "arbres");
+        const { error } = await supabase.from("arbres").insert({
+          nom: nomArbre.trim(), photo_url, lat, lng,
+          organisation_id: org.id, device_id: DEVICE_ID,
+          valide: false, publie: false, is_deleted: false,
+        });
+        if (error) throw error;
+        setNomArbre(""); setPhotoArbre(null); setShowFormArbre(false);
+        chargerArbres(org);
+      } catch (err) {
+        setErreurArbre("Échec de l'enregistrement : " + (err.message || "erreur inconnue"));
+      } finally {
+        setBusyArbre(false);
+      }
+    };
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => finalize(pos.coords.latitude, pos.coords.longitude),
+        () => finalize(AFRICA_CENTER[0], AFRICA_CENTER[1]),
+        { timeout: 6000, enableHighAccuracy: true }
+      );
+    } else {
+      finalize(AFRICA_CENTER[0], AFRICA_CENTER[1]);
+    }
+  }
+
   if (!org) return <Screen><div style={{ textAlign: "center", padding: 40, color: "var(--c-text-muted)" }}>Chargement…</div></Screen>;
 
   const colonnes = [
@@ -4599,6 +4653,73 @@ function EspaceOrganisation({ organisationEmail, onBack }) {
       <div style={{ fontSize: 11.5, color: "var(--c-text-muted)", marginBottom: 14 }}>
         Domaine(s) : {(org.defis || []).map(id => defisNoms[id] || id).join(", ") || "aucun"}
       </div>
+
+      <div style={{ fontFamily: "Fraunces, serif", fontSize: 15, fontWeight: 600, color: "var(--c-accent-dark)", marginBottom: 10, display: "flex", alignItems: "center", gap: 8 }}>
+        <IconTree size={16} /> Reboisement — Mon Arbre
+      </div>
+      <div style={{ fontSize: 11.5, color: "var(--c-text-secondary)", marginBottom: 10 }}>
+        Enregistre les arbres plantés dans le cadre de vos projets de reboisement. Chaque arbre est
+        associé à {org.nom} et passe en attente de validation par l'administration PACE, comme pour
+        les plantations citoyennes.
+      </div>
+
+      {!showFormArbre && (
+        <button onClick={() => setShowFormArbre(true)} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "10px 14px", borderRadius: 12, border: "none", background: "var(--c-accent-dark)", color: "#fff", fontWeight: 600, fontSize: 13, cursor: "pointer", marginBottom: 14 }}>
+          <IconPlus size={16} /> Enregistrer un arbre planté
+        </button>
+      )}
+
+      {showFormArbre && (
+        <div style={{ background: "var(--c-surface)", borderRadius: 14, padding: 14, border: "1px solid var(--c-border)", marginBottom: 14 }}>
+          <input ref={fileArbreRef} type="file" accept="image/*" onChange={handlePhotoArbre} style={{ display: "none" }} />
+          {photoArbre ? (
+            <img src={photoArbre} style={{ width: "100%", borderRadius: 10, maxHeight: 130, objectFit: "cover", marginBottom: 10 }} />
+          ) : (
+            <button onClick={() => fileArbreRef.current && fileArbreRef.current.click()} style={{ width: "100%", padding: "10px 0", borderRadius: 10, border: "1px dashed var(--c-border)", background: "var(--c-surface-soft)", color: "var(--c-text-muted)", fontSize: 12.5, cursor: "pointer", marginBottom: 10 }}>
+              Ajouter une photo (optionnel)
+            </button>
+          )}
+          <input value={nomArbre} onChange={e => setNomArbre(e.target.value)} placeholder="Essence / nom de l'arbre (ex : Manguier, Teck…)"
+            style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10, boxSizing: "border-box" }} />
+          {erreurArbre && <div role="alert" style={{ fontSize: 12, color: "#B5451B", marginBottom: 10 }}>{erreurArbre}</div>}
+          <div style={{ fontSize: 11, color: "var(--c-text-muted)", marginBottom: 10 }}>La position GPS de l'appareil sera utilisée pour géolocaliser la plantation.</div>
+          <button onClick={planterArbreOrganisation} disabled={busyArbre || !nomArbre.trim()} style={{
+            padding: "9px 14px", borderRadius: 10, border: "none",
+            background: (!nomArbre.trim()) ? "var(--c-text-faint)" : "var(--c-accent-dark)", color: "#fff", fontWeight: 600, fontSize: 12.5,
+            cursor: (!nomArbre.trim()) ? "default" : "pointer", marginRight: 8 }}>
+            {busyArbre ? "…" : "Enregistrer"}
+          </button>
+          <button onClick={() => { setShowFormArbre(false); setErreurArbre(""); setNomArbre(""); setPhotoArbre(null); }} style={{ padding: "9px 14px", borderRadius: 10, border: "1px solid var(--c-border)", background: "var(--c-surface)", color: "var(--c-text-secondary)", fontWeight: 600, fontSize: 12.5, cursor: "pointer" }}>
+            Annuler
+          </button>
+        </div>
+      )}
+
+      {mesArbres === null ? (
+        <div style={{ textAlign: "center", color: "var(--c-text-muted)", fontSize: 13, marginBottom: 20 }}>Chargement…</div>
+      ) : mesArbres.length === 0 ? (
+        <div style={{ textAlign: "center", color: "var(--c-text-muted)", fontSize: 13, padding: 16, marginBottom: 20 }}>Aucun arbre enregistré pour vos projets de reboisement pour le moment.</div>
+      ) : (
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ fontSize: 11.5, color: "var(--c-text-muted)", marginBottom: 8 }}>
+            {mesArbres.length} arbre(s) — {mesArbres.filter(a => a.valide).length} validé(s), {mesArbres.filter(a => !a.valide).length} en attente
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {mesArbres.map(a => (
+              <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "var(--c-surface)", borderRadius: 10, padding: "8px 10px", border: "1px solid var(--c-border)" }}>
+                {a.photo_url ? <img src={a.photo_url} style={{ width: 36, height: 36, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} /> : <div style={{ width: 36, height: 36, borderRadius: 8, background: "var(--c-surface-soft)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><IconTree size={16} color="var(--c-text-muted)" /></div>}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 600 }}>{a.nom}</div>
+                  <div style={{ fontSize: 10.5, color: "var(--c-text-muted)" }}>{new Date(a.created_at).toLocaleDateString("fr-FR")}</div>
+                </div>
+                <span style={{ fontSize: 10.5, fontWeight: 700, color: a.valide ? "#fff" : "var(--c-text-muted)", background: a.valide ? "var(--c-accent)" : "var(--c-surface-soft)", borderRadius: 999, padding: "3px 8px", flexShrink: 0 }}>
+                  {a.valide ? "Validé" : "En attente"}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div style={{ fontFamily: "Fraunces, serif", fontSize: 15, fontWeight: 600, color: "var(--c-accent-dark)", marginBottom: 10 }}>Signalements de votre domaine</div>
       {signalements === null ? (
