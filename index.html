@@ -139,26 +139,6 @@
 <body>
 <div id="root"></div>
 
-<!-- DEBUG TEMPORAIRE — à retirer une fois le problème de carte diagnostiqué.
-     Affiche à l'écran toute erreur JS qui se produit, pour pouvoir la lire sur mobile
-     sans avoir besoin des outils développeur. -->
-<div id="debug-overlay" style="display:none; position:fixed; top:0; left:0; right:0; z-index:999999; background:#b91c1c; color:#fff; font:12px/1.4 monospace; padding:10px; max-height:50vh; overflow:auto; white-space:pre-wrap;"></div>
-<script>
-(function () {
-  var box = document.getElementById("debug-overlay");
-  function show(msg) {
-    box.style.display = "block";
-    box.textContent += msg + "\n\n";
-  }
-  window.addEventListener("error", function (e) {
-    show("ERREUR : " + e.message + "\n" + (e.filename || "") + ":" + (e.lineno || "") + ":" + (e.colno || "") + "\n" + (e.error && e.error.stack ? e.error.stack : ""));
-  });
-  window.addEventListener("unhandledrejection", function (e) {
-    show("PROMESSE REJETÉE : " + (e.reason && e.reason.message ? e.reason.message : e.reason) + "\n" + (e.reason && e.reason.stack ? e.reason.stack : ""));
-  });
-})();
-</script>
-
 <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
@@ -3140,7 +3120,10 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
 
   useEffect(() => {
     if (mapRef.current || !mapElRef.current || typeof L === "undefined") return;
-    const map = L.map(mapElRef.current, { zoomControl: true }).setView(AFRICA_CENTER, 4);
+    // maxZoom explicite requis par L.markerClusterGroup (calcule ses niveaux de cluster à
+    // partir de map.getMaxZoom()) — les tuiles vectorielles MapLibre, contrairement aux
+    // anciennes tuiles raster CARTO, ne renseignent pas cette valeur automatiquement.
+    const map = L.map(mapElRef.current, { zoomControl: true, maxZoom: 19 }).setView(AFRICA_CENTER, 4);
     // Fond de carte standard : tuiles vectorielles OpenFreeMap (gratuites, sans clé API),
     // rendues via MapLibre GL et branchées sur Leaflet grâce à maplibre-gl-leaflet.
     // Contrairement à l'ancien fond CARTO raster, ces tuiles ne passent pas par le cache
