@@ -3096,7 +3096,15 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
 
   useEffect(() => {
     if (!mapRef.current) return;
-    setTimeout(() => mapRef.current.invalidateSize(), 250);
+    setTimeout(() => {
+      mapRef.current.invalidateSize();
+      // invalidateSize() ne redimensionne que le conteneur Leaflet ; le canvas WebGL
+      // du fond vectoriel MapLibre doit être redimensionné séparément, sinon il reste
+      // coupé/mal cadré après un changement de taille (plein écran, rotation d'écran...).
+      if (tileStandardRef.current && tileStandardRef.current.getMaplibreMap) {
+        tileStandardRef.current.getMaplibreMap().resize();
+      }
+    }, 250);
   }, [fullscreen]);
 
   useEffect(() => {
@@ -3216,7 +3224,20 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
       setLocating(false);
     }
 
-    setTimeout(() => map.invalidateSize(), 200);
+    setTimeout(() => {
+      map.invalidateSize();
+      if (tileStandardRef.current && tileStandardRef.current.getMaplibreMap) {
+        tileStandardRef.current.getMaplibreMap().resize();
+      }
+    }, 200);
+
+    // Rotation d'écran / redimensionnement de fenêtre : le canvas WebGL du fond vectoriel
+    // ne suit pas automatiquement Leaflet, on le force à se recadrer.
+    window.addEventListener("resize", () => {
+      if (tileStandardRef.current && tileStandardRef.current.getMaplibreMap) {
+        tileStandardRef.current.getMaplibreMap().resize();
+      }
+    });
   }, []);
 
   useEffect(() => {
