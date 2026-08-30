@@ -139,6 +139,26 @@
 <body>
 <div id="root"></div>
 
+<!-- DEBUG TEMPORAIRE — à retirer une fois le problème de carte diagnostiqué.
+     Affiche à l'écran toute erreur JS qui se produit, pour pouvoir la lire sur mobile
+     sans avoir besoin des outils développeur. -->
+<div id="debug-overlay" style="display:none; position:fixed; top:0; left:0; right:0; z-index:999999; background:#b91c1c; color:#fff; font:12px/1.4 monospace; padding:10px; max-height:50vh; overflow:auto; white-space:pre-wrap;"></div>
+<script>
+(function () {
+  var box = document.getElementById("debug-overlay");
+  function show(msg) {
+    box.style.display = "block";
+    box.textContent += msg + "\n\n";
+  }
+  window.addEventListener("error", function (e) {
+    show("ERREUR : " + e.message + "\n" + (e.filename || "") + ":" + (e.lineno || "") + ":" + (e.colno || "") + "\n" + (e.error && e.error.stack ? e.error.stack : ""));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    show("PROMESSE REJETÉE : " + (e.reason && e.reason.message ? e.reason.message : e.reason) + "\n" + (e.reason && e.reason.stack ? e.reason.stack : ""));
+  });
+})();
+</script>
+
 <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
@@ -3127,10 +3147,29 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
     // IndexedDB de la section 5 (creerCoucheTuilesHorsLigne) : le pré-téléchargement
     // hors-ligne du fond standard n'est donc plus disponible pour le moment (voir note
     // dans la fonction de téléchargement hors-ligne plus bas).
-    tileStandardRef.current = L.maplibreGL({
-      style: "https://tiles.openfreemap.org/styles/liberty",
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://openfreemap.org">OpenFreeMap</a>',
-    }).addTo(map);
+    // Repli automatique : certains appareils/navigateurs (WebGL désactivé, script bloqué
+    // par un bloqueur de pub, vieux webview Android...) ne peuvent pas initialiser MapLibre.
+    // Plutôt que de laisser la carte vide, on bascule alors sur un fond raster classique.
+    let coucheVectorielleOk = false;
+    if (typeof L.maplibreGL === "function") {
+      try {
+        const coucheVectorielle = L.maplibreGL({
+          style: "https://tiles.openfreemap.org/styles/liberty",
+          attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://openfreemap.org">OpenFreeMap</a>',
+        });
+        coucheVectorielle.addTo(map);
+        tileStandardRef.current = coucheVectorielle;
+        coucheVectorielleOk = true;
+      } catch (e) {
+        console.warn("Fond vectoriel MapLibre indisponible, repli sur le fond raster :", e);
+      }
+    }
+    if (!coucheVectorielleOk) {
+      tileStandardRef.current = creerCoucheTuilesHorsLigne("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+        maxZoom: 19, id: "osm-secours",
+      }).addTo(map);
+    }
     tileSatelliteRef.current = creerCoucheTuilesHorsLigne("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
       attribution: "Tiles &copy; Esri", maxZoom: 19, id: "satellite",
     });
