@@ -5833,7 +5833,7 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
                   {s.moderation_motif && (
                     <div style={{ fontSize: 10.5, color: "var(--c-text-muted)", marginBottom: 4 }}>Dernière modération : {MOTIF_LABELS_ADMIN[s.moderation_motif] || s.moderation_motif}</div>
                   )}
-                  <div style={{ fontSize: 11, color: "var(--c-text-muted)", marginBottom: 6 }}>{s.date} · appareil {s.device_id.slice(0, 6)}</div>
+                  <div style={{ fontSize: 11, color: "var(--c-text-muted)", marginBottom: 6 }}>{s.date} · appareil {s.device_id ? s.device_id.slice(0, 6) : "?"}</div>
                   {s.benevole_nom && (
                     <div style={{ fontSize: 11, color: "var(--c-text-secondary)", background: "var(--c-bg)", border: "1px solid var(--c-border)", borderRadius: 8, padding: "6px 8px", marginBottom: 6 }}>
                       <IconUsers size={11} style={{ verticalAlign: -1, marginRight: 4 }} />
