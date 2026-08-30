@@ -5322,7 +5322,7 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
   // table brute plutôt que de dépendre du flux public déjà filtré en amont.
   const [signalementsAdmin, setSignalementsAdmin] = useState(null);
   async function chargerSignalementsAdmin() {
-    const { data } = await supabase.from("signalements").select("*").order("created_at", { ascending: false }).limit(2000);
+    const { data } = await supabase.from("signalements").select("*").eq("is_deleted", false).order("created_at", { ascending: false }).limit(2000);
     if (data) setSignalementsAdmin(data);
   }
   useEffect(() => { if (isAdmin) chargerSignalementsAdmin(); }, [isAdmin]);
@@ -5846,7 +5846,7 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
                   {s.description && <div style={{ fontSize: 12.5, color: "var(--c-text-secondary)", marginBottom: 8 }}>{s.description}</div>}
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                     {!s.valide && (
-                      <button onClick={() => onValidate(s.id)} style={{
+                      <button onClick={() => { onValidate(s.id); setSignalementsAdmin(prev => prev ? prev.map(x => x.id === s.id ? { ...x, valide: true } : x) : prev); }} style={{
                         flex: "1 1 100%", fontSize: 11.5, padding: "7px 0", borderRadius: 8, border: "none", cursor: "pointer", fontWeight: 600,
                         background: "var(--c-accent-dark)", color: "#fff" }}>
                         ✓ Valider et publier
@@ -5859,7 +5859,14 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
                         ↺ Repasser en vérification
                       </button>
                     )}
-                    <button onClick={() => s.statut === "resolu" ? onUpdateStatut(s.id, "attente") : setModerationModal({ type: "resolve", signalement: s })} style={{
+                    <button onClick={() => {
+                      if (s.statut === "resolu") {
+                        onUpdateStatut(s.id, "attente");
+                        setSignalementsAdmin(prev => prev ? prev.map(x => x.id === s.id ? { ...x, statut: "attente", resolution_organisme: null, resolution_action: null, resolved_at: null } : x) : prev);
+                      } else {
+                        setModerationModal({ type: "resolve", signalement: s });
+                      }
+                    }} style={{
                       flex: 1, fontSize: 11.5, padding: "7px 0", borderRadius: 8, border: "none", cursor: "pointer", fontWeight: 600,
                       background: s.statut === "resolu" ? "var(--c-bg)" : "var(--c-accent)", color: s.statut === "resolu" ? "var(--c-text-secondary)" : "#fff" }}>
                       {s.statut === "resolu" ? "Remettre en attente" : "Marquer résolu"}
@@ -5890,7 +5897,11 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
           motifOptions={MOTIF_OPTIONS_ADMIN}
           danger
           onCancel={() => setModerationModal(null)}
-          onConfirm={async (payload) => { await onRevertModeration(moderationModal.signalement, payload); setModerationModal(null); }}
+          onConfirm={async (payload) => {
+            await onRevertModeration(moderationModal.signalement, payload);
+            setSignalementsAdmin(prev => prev ? prev.map(x => x.id === moderationModal.signalement.id ? { ...x, valide: false, statut: "attente", moderation_motif: payload.motif } : x) : prev);
+            setModerationModal(null);
+          }}
         />
       )}
       {moderationModal && moderationModal.type === "delete" && (
@@ -5901,7 +5912,11 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
           confirmLabel="Mettre à la corbeille"
           danger
           onCancel={() => setModerationModal(null)}
-          onConfirm={async (payload) => { await onSoftDeleteSignalement(moderationModal.signalement, payload); setModerationModal(null); }}
+          onConfirm={async (payload) => {
+            await onSoftDeleteSignalement(moderationModal.signalement, payload);
+            setSignalementsAdmin(prev => prev ? prev.filter(s => s.id !== moderationModal.signalement.id) : prev);
+            setModerationModal(null);
+          }}
         />
       )}
       {moderationModal && moderationModal.type === "resolve" && (
@@ -5912,7 +5927,11 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
           confirmLabel="Marquer résolu"
           motifOptions={ORGANISME_OPTIONS}
           onCancel={() => setModerationModal(null)}
-          onConfirm={async (payload) => { await onResolve(moderationModal.signalement, { organisme: payload.motif, action: payload.reason }); setModerationModal(null); }}
+          onConfirm={async (payload) => {
+            await onResolve(moderationModal.signalement, { organisme: payload.motif, action: payload.reason });
+            setSignalementsAdmin(prev => prev ? prev.map(x => x.id === moderationModal.signalement.id ? { ...x, statut: "resolu", resolution_organisme: payload.motif, resolution_action: payload.reason, resolved_at: new Date().toISOString() } : x) : prev);
+            setModerationModal(null);
+          }}
         />
       )}
 
