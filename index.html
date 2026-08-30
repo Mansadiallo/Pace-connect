@@ -12,6 +12,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="PACE Connect" />
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<link href="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css" rel="stylesheet" />
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.css" />
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.Default.css" />
@@ -144,6 +145,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.js"></script>
+<script src="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet/leaflet-maplibre-gl.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.25/jspdf.plugin.autotable.min.js"></script>
@@ -2258,10 +2261,7 @@ function Accueil({ signalements, arbres, notifState, onEnableNotif, onOpenAdmin,
 
       {estBenevoleValide && <VolunteerCard lang={lang} benevoleStatut={benevoleStatut} />}
 
-      <button onClick={onOpenAdmin} style={{
-        marginTop: 24, width: "100%", background: "none", border: "none", color: "var(--c-text-faint)",
-        fontSize: 11, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, padding: 8
-      }}><IconShield size={12} /> {t(lang, "centre_controle")}</button>
+      {/* Lien "Centre de contrôle" retiré de l'écran d'accueil : accès admin uniquement via ?admin=1 dans l'URL */}
       <button onClick={() => onNavigate("confidentialite")} style={{
         width: "100%", background: "none", border: "none", color: "var(--c-text-faint)",
         fontSize: 11, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, padding: 8
@@ -2927,6 +2927,10 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
 
   async function telechargerZoneHorsLigne() {
     if (!mapRef.current) return;
+    // Le fond standard est désormais en tuiles vectorielles (OpenFreeMap/MapLibre), qui ne
+    // passent pas par ce cache IndexedDB tuile-par-tuile. Seul le fond satellite (raster) peut
+    // être pré-téléchargé pour l'instant : on bascule dessus si l'utilisateur est en mode standard.
+    if (!satellite) { return; }
     setOfflineDownloading(true);
     offlineCancelRef.current = false;
     const bounds = mapRef.current.getBounds();
@@ -2935,9 +2939,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
     const zMax = Math.min(18, zActuel + 2); // zone + 2 niveaux de zoom pour naviguer une fois sur place
     const tuiles = tilesPourZone(bounds, zMin, zMax);
     setOfflineProgress({ done: 0, total: tuiles.length });
-    const urlBase = satellite
-      ? { tpl: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", id: "satellite", subs: null }
-      : { tpl: "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png", id: "osm", subs: "abcd" };
+    const urlBase = { tpl: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", id: "satellite", subs: null };
     let done = 0;
     for (const t of tuiles) {
       if (offlineCancelRef.current) break;
@@ -3111,12 +3113,15 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
   useEffect(() => {
     if (mapRef.current || !mapElRef.current || typeof L === "undefined") return;
     const map = L.map(mapElRef.current, { zoomControl: true }).setView(AFRICA_CENTER, 4);
-    // Tuiles servies via un cache IndexedDB local (section 5 — mode hors connexion) :
-    // en ligne, elles sont téléchargées puis mises en cache automatiquement ;
-    // hors ligne, les tuiles déjà visitées ou pré-téléchargées restent affichées.
-    tileStandardRef.current = creerCoucheTuilesHorsLigne("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
-      maxZoom: 19, id: "osm", subdomains: "abcd",
+    // Fond de carte standard : tuiles vectorielles OpenFreeMap (gratuites, sans clé API),
+    // rendues via MapLibre GL et branchées sur Leaflet grâce à maplibre-gl-leaflet.
+    // Contrairement à l'ancien fond CARTO raster, ces tuiles ne passent pas par le cache
+    // IndexedDB de la section 5 (creerCoucheTuilesHorsLigne) : le pré-téléchargement
+    // hors-ligne du fond standard n'est donc plus disponible pour le moment (voir note
+    // dans la fonction de téléchargement hors-ligne plus bas).
+    tileStandardRef.current = L.maplibreGL({
+      style: "https://tiles.openfreemap.org/styles/liberty",
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://openfreemap.org">OpenFreeMap</a>',
     }).addTo(map);
     tileSatelliteRef.current = creerCoucheTuilesHorsLigne("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
       attribution: "Tiles &copy; Esri", maxZoom: 19, id: "satellite",
@@ -3502,6 +3507,11 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
             Télécharge la zone actuellement affichée pour pouvoir naviguer, mesurer et collecter des données sans réseau. Les données collectées hors ligne sont conservées et envoyées automatiquement dès que la connexion revient.
           </div>
           <div style={{ fontSize: 12, marginBottom: 10 }}>{tilesCachedCount} tuile{tilesCachedCount > 1 ? "s" : ""} déjà en cache sur cet appareil.</div>
+          {!satellite && (
+            <div style={{ fontSize: 11.5, color: "var(--c-text-muted)", background: "var(--c-bg)", borderRadius: 8, padding: 8, marginBottom: 10, lineHeight: 1.5 }}>
+              Le téléchargement hors-ligne n'est disponible que pour le fond satellite pour le moment. Passe en vue satellite pour pré-télécharger cette zone.
+            </div>
+          )}
           {offlineDownloading ? (
             <>
               <div style={{ height: 8, borderRadius: 4, background: "var(--c-bg)", overflow: "hidden", marginBottom: 6 }}>
@@ -3512,7 +3522,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
             </>
           ) : (
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={telechargerZoneHorsLigne} style={{ flex: 2, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "9px 0", borderRadius: 8, border: "none", background: "var(--c-accent-dark)", color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+              <button onClick={telechargerZoneHorsLigne} disabled={!satellite} style={{ flex: 2, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "9px 0", borderRadius: 8, border: "none", background: satellite ? "var(--c-accent-dark)" : "var(--c-border)", color: satellite ? "#fff" : "var(--c-text-faint)", fontSize: 12, fontWeight: 600, cursor: satellite ? "pointer" : "not-allowed" }}>
                 <IconCloudDownload size={14} /> Télécharger cette zone
               </button>
               <button onClick={viderCacheHorsLigne} style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: "1px solid var(--c-border)", background: "none", color: "var(--c-text-secondary)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Vider</button>
@@ -8194,13 +8204,9 @@ function App() {
             display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}>
             <IconSettings size={17} color="#fff" />
           </button>
-          {!showAdmin && (
-            <button onClick={() => setShowAdmin(true)} aria-label={t(lang, "centre_controle")} title={t(lang, "centre_controle")} style={{
-              background: "rgba(255,255,255,0.18)", border: "none", borderRadius: "50%", width: 38, height: 38,
-              display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}>
-              <IconShield size={17} color="#fff" />
-            </button>
-          )}
+          {/* Bouton du Centre de contrôle retiré de l'interface visible : l'accès admin
+              se fait uniquement via l'URL dédiée ?admin=1 (voir initialUrlState plus haut),
+              pour qu'un utilisateur ordinaire ne puisse pas tomber dessus par erreur. */}
         </div>
 
         {showThemePanel && (
