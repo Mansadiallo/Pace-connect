@@ -167,6 +167,7 @@ const IconMapPin = (p) => <Icon {...p} path={<><path d="M20 10c0 6-8 12-8 12s-8-
 const IconTree = (p) => <Icon {...p} path={<><path d="M12 22v-7"/><path d="M9 9a3 3 0 1 1 6 0c0 2-2 3-3 3s-3-1-3-3z"/><path d="M6 13a4 4 0 1 1 8 0c0 2.2-2 4-4 4s-4-1.8-4-4z"/><path d="M10 6a2.5 2.5 0 1 1 5 0c0 1.6-1.5 2.5-2.5 2.5S10 7.6 10 6z"/></>} />;
 const IconAlert = (p) => <Icon {...p} path={<><path d="M10.3 3.9 1.8 18a1.8 1.8 0 0 0 1.5 2.7h17.4a1.8 1.8 0 0 0 1.5-2.7L13.7 3.9a1.8 1.8 0 0 0-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></>} />;
 const IconCamera = (p) => <Icon {...p} path={<><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></>} />;
+const IconImage = (p) => <Icon {...p} path={<><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></>} />;
 const IconX = (p) => <Icon {...p} path={<><path d="M18 6 6 18"/><path d="M6 6l12 12"/></>} />;
 const IconChevronLeft = (p) => <Icon {...p} path={<path d="M15 18l-6-6 6-6"/>} />;
 const IconFlame = (p) => <Icon {...p} path={<path d="M12 2c1 3-2 4-2 7a3 3 0 0 0 6 0c2 1 3 3 3 5a7 7 0 0 1-14 0c0-4 3-5 4-9 1 2 2 2 3-3z"/>} />;
@@ -289,6 +290,312 @@ async function uploadPhotoGeneric(dataUrl, prefix) {
     console.error("Erreur d'upload photo :", e);
     return null;
   }
+}
+
+// Les signalements/arbres/observations peuvent désormais porter une photo OU une courte vidéo
+// (même champ "photo_url" / "photo" côté stockage) : ce helper distingue les deux par extension
+// pour choisir entre <img> et <video> à l'affichage, sans changer le schéma de données.
+function isVideoUrl(url) {
+  if (!url) return false;
+  return /\.(webm|mp4|mov|m4v|ogg)(\?|$)/i.test(url) || (typeof url === "string" && url.startsWith("blob:"));
+}
+
+// Composant d'affichage unifié (miniature/aperçu) pour un média photo ou vidéo.
+function MediaThumb({ src, style, controls = true }) {
+  if (!src) return null;
+  if (isVideoUrl(src)) {
+    return <video src={src} controls={controls} playsInline muted={!controls} style={style} />;
+  }
+  return <img src={src} alt="" style={style} />;
+}
+
+// Variante compacte pour les petites vignettes (listes) : affiche un pictogramme lecture
+// plutôt qu'une balise <video> peu lisible en dessous d'une cinquantaine de pixels.
+function MediaThumbSmall({ src, style }) {
+  if (!src) return null;
+  if (isVideoUrl(src)) {
+    return (
+      <div style={{ ...style, background: "#17211C", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <IconPlay size={Math.max(12, Math.round(((style && style.width) || 40) * 0.4))} color="#fff" />
+      </div>
+    );
+  }
+  return <img src={src} alt="" style={style} />;
+}
+
+// Équivalent en chaîne HTML brute, pour les popups Leaflet qui n'utilisent pas JSX.
+function mediaHtml(url, maxHeight = 110) {
+  if (!url) return "";
+  const baseStyle = `width:100%;max-height:${maxHeight}px;object-fit:cover;border-radius:8px;margin-top:6px`;
+  if (isVideoUrl(url)) {
+    return `<video src="${url}" style="${baseStyle};background:#000" controls playsInline muted></video>`;
+  }
+  return `<img src="${url}" style="${baseStyle}" />`;
+}
+
+// --- Appareil photo intégré (aperçu live + capture photo ET vidéo, sans quitter l'app) ---
+const CAMERA_VIDEO_MAX_SECONDS = 60;
+
+function CameraCapture({ onCapture, onClose }) {
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const audioStreamRef = useRef(null);
+  const recorderRef = useRef(null);
+  const chunksRef = useRef([]);
+  const timerRef = useRef(null);
+  const [facingMode, setFacingMode] = useState("environment");
+  const [error, setError] = useState(null);
+  const [ready, setReady] = useState(false);
+  const [mode, setMode] = useState("photo"); // "photo" | "video"
+  const [isRecording, setIsRecording] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+
+  function stopVideoStream() {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(tr => tr.stop());
+      streamRef.current = null;
+    }
+  }
+  function stopAudioStream() {
+    if (audioStreamRef.current) {
+      audioStreamRef.current.getTracks().forEach(tr => tr.stop());
+      audioStreamRef.current = null;
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    async function start() {
+      setReady(false);
+      setError(null);
+      stopVideoStream();
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: facingMode }, width: { ideal: 1280 }, height: { ideal: 1280 } },
+          audio: false,
+        });
+        if (cancelled) { stream.getTracks().forEach(tr => tr.stop()); return; }
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          try { await videoRef.current.play(); } catch (e) {}
+        }
+        if (!cancelled) setReady(true);
+      } catch (e) {
+        if (!cancelled) setError(e && e.name === "NotAllowedError" ? "permission" : "unavailable");
+      }
+    }
+    start();
+    return () => {
+      cancelled = true;
+      stopVideoStream();
+      stopAudioStream();
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    };
+  }, [facingMode]);
+
+  function handleCapturePhoto() {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+    onCapture({ kind: "photo", dataUrl: canvas.toDataURL("image/jpeg", 0.85) });
+  }
+
+  async function startRecording() {
+    if (!streamRef.current || isRecording) return;
+    try {
+      const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioStreamRef.current = audioStream;
+      const combined = new MediaStream([
+        ...streamRef.current.getVideoTracks(),
+        ...audioStream.getAudioTracks(),
+      ]);
+      const candidates = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"];
+      const mimeType = candidates.find(c => window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(c)) || "";
+      const recorder = mimeType ? new MediaRecorder(combined, { mimeType }) : new MediaRecorder(combined);
+      chunksRef.current = [];
+      recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunksRef.current.push(e.data); };
+      recorder.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "video/webm" });
+        chunksRef.current = [];
+        stopAudioStream();
+        onCapture({ kind: "video", blob, url: URL.createObjectURL(blob) });
+      };
+      recorderRef.current = recorder;
+      recorder.start();
+      setIsRecording(true);
+      setElapsed(0);
+      timerRef.current = setInterval(() => {
+        setElapsed(prev => {
+          const next = prev + 1;
+          if (next >= CAMERA_VIDEO_MAX_SECONDS) stopRecording();
+          return next;
+        });
+      }, 1000);
+    } catch (e) {
+      setError("permission");
+    }
+  }
+
+  function stopRecording() {
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    if (recorderRef.current && recorderRef.current.state !== "inactive") {
+      recorderRef.current.stop();
+    }
+    setIsRecording(false);
+  }
+
+  function handleMainButton() {
+    if (mode === "photo") { handleCapturePhoto(); return; }
+    if (isRecording) stopRecording(); else startRecording();
+  }
+
+  function handleClose() {
+    if (isRecording) stopRecording();
+    onClose();
+  }
+
+  function fmtTime(s) {
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return `${m}:${String(sec).padStart(2, "0")}`;
+  }
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "#000", zIndex: 4000, display: "flex", flexDirection: "column" }}>
+      <div style={{ position: "relative", flex: 1, overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        {error ? (
+          <div style={{ color: "#fff", textAlign: "center", padding: 28, fontSize: 13, lineHeight: 1.5 }}>
+            {error === "permission"
+              ? "Accès à la caméra ou au micro refusé. Autorise l'accès dans les réglages du navigateur, ou choisis un fichier depuis la galerie."
+              : "Caméra indisponible sur cet appareil. Choisis un fichier depuis la galerie."}
+          </div>
+        ) : (
+          <video ref={videoRef} playsInline muted autoPlay style={{ width: "100%", height: "100%", objectFit: "cover", transform: facingMode === "user" ? "scaleX(-1)" : "none" }} />
+        )}
+        {isRecording && (
+          <div style={{ position: "absolute", top: 16, left: "50%", transform: "translateX(-50%)", background: "rgba(181,69,27,0.9)", color: "#fff", fontSize: 12.5, fontWeight: 600, padding: "5px 12px", borderRadius: 20, display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#fff", display: "inline-block" }} />
+            {fmtTime(elapsed)}
+          </div>
+        )}
+        <button onClick={handleClose} aria-label="Fermer la caméra" style={{ position: "absolute", top: 16, left: 16, background: "rgba(0,0,0,0.45)", border: "none", borderRadius: "50%", width: 38, height: 38, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+          <IconX size={18} color="#fff" />
+        </button>
+        {!error && !isRecording && (
+          <button onClick={() => setFacingMode(m => m === "environment" ? "user" : "environment")} aria-label="Changer de caméra" style={{ position: "absolute", top: 16, right: 16, background: "rgba(0,0,0,0.45)", border: "none", borderRadius: "50%", width: 38, height: 38, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+            <IconRotateCcw size={17} color="#fff" />
+          </button>
+        )}
+      </div>
+      <div style={{ background: "#000", padding: "14px 0 28px", display: "flex", flexDirection: "column", alignItems: "center", gap: 14 }}>
+        {error ? (
+          <button onClick={onClose} style={{ padding: "10px 22px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.3)", background: "transparent", color: "#fff", fontSize: 13, cursor: "pointer" }}>Fermer</button>
+        ) : (
+          <React.Fragment>
+            {!isRecording && (
+              <div style={{ display: "flex", gap: 6, background: "rgba(255,255,255,0.12)", borderRadius: 20, padding: 3 }}>
+                <button onClick={() => setMode("photo")} style={{ padding: "6px 16px", borderRadius: 16, border: "none", cursor: "pointer", fontSize: 12, fontWeight: 600, background: mode === "photo" ? "#fff" : "transparent", color: mode === "photo" ? "#17211C" : "#fff" }}>Photo</button>
+                <button onClick={() => setMode("video")} style={{ padding: "6px 16px", borderRadius: 16, border: "none", cursor: "pointer", fontSize: 12, fontWeight: 600, background: mode === "video" ? "#fff" : "transparent", color: mode === "video" ? "#17211C" : "#fff" }}>Vidéo</button>
+              </div>
+            )}
+            <button onClick={handleMainButton} disabled={!ready} aria-label={mode === "photo" ? "Prendre la photo" : (isRecording ? "Arrêter l'enregistrement" : "Démarrer l'enregistrement")} style={{
+              width: 68, height: 68, borderRadius: "50%", border: `4px solid ${mode === "video" ? "#B5451B" : "#fff"}`,
+              background: ready ? "rgba(255,255,255,0.15)" : "rgba(255,255,255,0.05)",
+              cursor: ready ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              {mode === "video" && (
+                isRecording
+                  ? <span style={{ width: 22, height: 22, borderRadius: 5, background: "#B5451B" }} />
+                  : <span style={{ width: 50, height: 50, borderRadius: "50%", background: "#B5451B" }} />
+              )}
+            </button>
+            {mode === "video" && (
+              <div style={{ color: "rgba(255,255,255,0.7)", fontSize: 11 }}>
+                {isRecording ? `Max. ${CAMERA_VIDEO_MAX_SECONDS}s — appuie pour arrêter` : "Appuie pour filmer"}
+              </div>
+            )}
+          </React.Fragment>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Bouton "photo/vidéo" réutilisable : ouvre la caméra intégrée par défaut (aperçu live,
+// capture photo ou enregistrement vidéo), avec repli vers le sélecteur de fichiers/galerie
+// si la caméra est indisponible ou refusée. La valeur de `photo` reste une simple chaîne
+// (data URL pour une image, URL blob locale pour une vidéo) afin de rester compatible avec
+// le flux d'upload existant (uploadPhoto/uploadPhotoGeneric font un fetch() de cette URL).
+function PhotoCaptureButton({ photo, onChange, label, previewMaxHeight = 160, compact = false }) {
+  const fileRef = useRef(null);
+  const [showCamera, setShowCamera] = useState(false);
+  const supportsCamera = typeof navigator !== "undefined" && navigator.mediaDevices && navigator.mediaDevices.getUserMedia;
+  const isVideo = isVideoUrl(photo);
+
+  function handleFile(e) {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    if (f.type && f.type.startsWith("video/")) {
+      onChange(URL.createObjectURL(f));
+      e.target.value = "";
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = async () => onChange(await compressImage(reader.result));
+    reader.readAsDataURL(f);
+    e.target.value = "";
+  }
+
+  async function handleCapture(result) {
+    setShowCamera(false);
+    if (result.kind === "video") {
+      onChange(result.url);
+    } else {
+      onChange(await compressImage(result.dataUrl));
+    }
+  }
+
+  function handleRemove() {
+    if (isVideo) { try { URL.revokeObjectURL(photo); } catch (e) {} }
+    onChange(null);
+  }
+
+  return (
+    <React.Fragment>
+      <input ref={fileRef} type="file" accept="image/*,video/*" onChange={handleFile} style={{ display: "none" }} />
+      {showCamera && <CameraCapture onCapture={handleCapture} onClose={() => setShowCamera(false)} />}
+      {photo ? (
+        <div style={{ position: "relative", marginBottom: compact ? 8 : 10 }}>
+          {isVideo ? (
+            <video src={photo} controls playsInline style={{ width: "100%", borderRadius: compact ? 10 : 12, maxHeight: previewMaxHeight, objectFit: "cover", background: "#000" }} />
+          ) : (
+            <img src={photo} alt="Aperçu" style={{ width: "100%", borderRadius: compact ? 10 : 12, maxHeight: previewMaxHeight, objectFit: "cover" }} />
+          )}
+          <button onClick={handleRemove} style={{ position: "absolute", top: 8, right: 8, background: "var(--c-text)bb", border: "none", borderRadius: "50%", width: 26, height: 26, color: "#fff", cursor: "pointer" }}><IconX size={14} /></button>
+        </div>
+      ) : (
+        <div style={{ display: "flex", gap: 8, marginBottom: compact ? 8 : 10 }}>
+          <button onClick={() => supportsCamera ? setShowCamera(true) : fileRef.current.click()} style={{
+            flex: 1, border: "1.5px dashed var(--c-text-faint)", borderRadius: compact ? 10 : 12,
+            padding: compact ? 12 : 14, background: "var(--c-surface-dashed)", color: "var(--c-text-secondary)",
+            cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: compact ? 12 : 12.5 }}>
+            <IconCamera size={compact ? 15 : 16} /> {label || "Ajouter une photo"}
+          </button>
+          {supportsCamera && (
+            <button onClick={() => fileRef.current.click()} aria-label="Choisir depuis la galerie" title="Choisir depuis la galerie" style={{
+              width: compact ? 40 : 44, flexShrink: 0, border: "1.5px dashed var(--c-text-faint)", borderRadius: compact ? 10 : 12,
+              background: "var(--c-surface-dashed)", color: "var(--c-text-secondary)", cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <IconImage size={compact ? 15 : 16} />
+            </button>
+          )}
+        </div>
+      )}
+    </React.Fragment>
+  );
 }
 
 // --- Signalisation d'appel (WebRTC via table pollée, pas de serveur dédié) ---
@@ -2320,7 +2627,6 @@ function Signaler({ onSubmit, lang }) {
   const [photo, setPhoto] = useState(null);
   const [donneesCollecte, setDonneesCollecte] = useState({});
   const [sent, setSent] = useState(false);
-  const fileRef = useRef(null);
 
   // Taxonomie dynamique (défis/problèmes publiés par le super-admin). Tant que rien n'est
   // publié, `defisPublies` reste vide et le formulaire se comporte exactement comme avant
@@ -2339,14 +2645,6 @@ function Signaler({ onSubmit, lang }) {
   const modeDynamique = !!(defisPublies && defisPublies.length > 0);
   const problemesDuDefi = defiChoisi ? problemesPublies.filter(p => p.defi_id === defiChoisi.id) : [];
   const champsDynamiques = (problemeChoisi && problemeChoisi.champs_collecte) || [];
-
-  function handlePhoto(e) {
-    const f = e.target.files && e.target.files[0];
-    if (!f) return;
-    const reader = new FileReader();
-    reader.onload = async () => setPhoto(await compressImage(reader.result));
-    reader.readAsDataURL(f);
-  }
 
   function champManquant() {
     // Les champs de type "photo" ne sont pas rendus ici (la photo est déjà gérée par le
@@ -2470,17 +2768,7 @@ function Signaler({ onSubmit, lang }) {
             ))}
           </div>
           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--c-text)", marginBottom: 8 }}>{t(lang, "photo_label")}</div>
-          <input ref={fileRef} type="file" accept="image/*" onChange={handlePhoto} style={{ display: "none" }} />
-          {photo ? (
-            <div style={{ position: "relative", marginBottom: 16 }}>
-              <img src={photo} alt={t(lang, "apercu_photo")} style={{ width: "100%", borderRadius: 12, maxHeight: 160, objectFit: "cover" }} />
-              <button onClick={() => setPhoto(null)} style={{ position: "absolute", top: 8, right: 8, background: "var(--c-text)bb", border: "none", borderRadius: "50%", width: 26, height: 26, color: "#fff", cursor: "pointer" }}><IconX size={14} /></button>
-            </div>
-          ) : (
-            <button onClick={() => fileRef.current.click()} style={{ width: "100%", border: "1.5px dashed var(--c-text-faint)", borderRadius: 12, padding: 18, background: "var(--c-surface-dashed)", color: "var(--c-text-secondary)", cursor: "pointer", marginBottom: 16, display: "flex", flexDirection: "column", alignItems: "center", gap: 6, fontSize: 12.5 }}>
-              <IconCamera size={20} /> {t(lang, "ajouter_photo")}
-            </button>
-          )}
+          <PhotoCaptureButton photo={photo} onChange={setPhoto} label={t(lang, "ajouter_photo")} previewMaxHeight={160} />
           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--c-text)", marginBottom: 8 }}>{t(lang, "description_label")}</div>
           <textarea value={description} onChange={e => setDescription(e.target.value)} rows={3} placeholder={t(lang, "decrire_situation")}
             style={{ width: "100%", borderRadius: 12, border: "1px solid var(--c-border)", padding: 10, fontSize: 13, fontFamily: "Work Sans, sans-serif", resize: "none" }} />
@@ -3309,7 +3597,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
         if (!passeFiltrePeriode(a.planted_at)) return;
         counts.arbres++;
         const icon = L.divIcon({ html: markerHtml("var(--c-accent)", "tree"), className: "", iconSize: [30, 30], iconAnchor: [15, 30] });
-        const photoHtml = a.photo_url ? `<img src="${a.photo_url}" style="width:100%;max-height:110px;object-fit:cover;border-radius:8px;margin-top:6px" />` : "";
+        const photoHtml = mediaHtml(a.photo_url, 110);
         const pendingHtml = !a.valide ? `<div style="font-size:11px;color:#B5451B;margin-top:4px">⏳ ${t(lang, "en_attente_validation")}</div>` : "";
         L.marker([a.lat, a.lng], { icon, opacity: a.valide ? 1 : 0.6 }).addTo(layerRef.current)
           .on("click", () => setSelected({ type: "arbre", data: a }))
@@ -3329,7 +3617,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
         const color = u ? u.color : "#B5451B";
         const icon = L.divIcon({ html: markerHtml(color, "pin"), className: "", iconSize: [30, 30], iconAnchor: [15, 30] });
         const cat = categorieMeta(s.categorie);
-        const photoHtml = s.photo_url ? `<img src="${s.photo_url}" style="width:100%;max-height:110px;object-fit:cover;border-radius:8px;margin-top:6px" />` : "";
+        const photoHtml = mediaHtml(s.photo_url, 110);
         const pendingHtml = !s.valide ? `<div style="font-size:11px;color:#B5451B;margin-top:4px">⏳ ${t(lang, "en_attente_validation")}</div>` : "";
         L.marker([s.lat, s.lng], { icon, opacity: s.valide ? 1 : 0.6 }).addTo(layerRef.current)
           .on("click", () => setSelected({ type: "signalement", data: s }))
@@ -3343,7 +3631,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
         if (!passeFiltrePeriode(o.created_at)) return;
         counts.biodiversite++;
         const icon = L.divIcon({ html: markerHtml("var(--c-sky)", "leaf"), className: "", iconSize: [30, 30], iconAnchor: [15, 30] });
-        const photoHtml = o.photo_url ? `<img src="${o.photo_url}" style="width:100%;max-height:110px;object-fit:cover;border-radius:8px;margin-top:6px" />` : "";
+        const photoHtml = mediaHtml(o.photo_url, 110);
         L.marker([o.lat, o.lng], { icon }).addTo(layerRef.current)
           .on("click", () => setSelected({ type: "observation", data: o }))
           .bindPopup(`<b>${o.espece || t(lang, "observation_generique")}</b><br/>${new Date(o.created_at).toLocaleDateString("fr-FR")}${photoHtml}`);
@@ -3399,7 +3687,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
     if (s.type === "signalement") {
       return (
         <>
-          {s.data.photo_url && <img src={s.data.photo_url} style={{ width: "100%", maxHeight: 180, objectFit: "cover", borderRadius: 10, marginBottom: 8 }} />}
+          <MediaThumb src={s.data.photo_url} style={{ width: "100%", maxHeight: 180, objectFit: "cover", borderRadius: 10, marginBottom: 8 }} />
           <div style={{ fontWeight: 600, fontSize: 14 }}>{categorieLabel(lang, s.data.categorie)}</div>
           <div style={{ fontSize: 12, color: "var(--c-text-muted)", marginTop: 3 }}>{s.data.date}{s.data.statut ? ` · ${s.data.statut}` : ""}</div>
           <div style={{ fontSize: 13, color: "var(--c-text-secondary)", marginTop: 6 }}>{s.data.description || t(lang, "aucune_description")}</div>
@@ -3409,7 +3697,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
     if (s.type === "observation") {
       return (
         <>
-          {s.data.photo_url && <img src={s.data.photo_url} style={{ width: "100%", maxHeight: 180, objectFit: "cover", borderRadius: 10, marginBottom: 8 }} />}
+          <MediaThumb src={s.data.photo_url} style={{ width: "100%", maxHeight: 180, objectFit: "cover", borderRadius: 10, marginBottom: 8 }} />
           <div style={{ fontWeight: 600, fontSize: 14 }}>{s.data.espece || t(lang, "observation_biodiversite")}</div>
           <div style={{ fontSize: 12, color: "var(--c-text-muted)", marginTop: 3 }}>{new Date(s.data.created_at).toLocaleDateString("fr-FR")}</div>
           <div style={{ fontSize: 13, color: "var(--c-text-secondary)", marginTop: 6 }}>{s.data.description || t(lang, "aucune_description")}</div>
@@ -3418,7 +3706,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
     }
     return (
       <>
-        {s.data.photo_url && <img src={s.data.photo_url} style={{ width: "100%", maxHeight: 180, objectFit: "cover", borderRadius: 10, marginBottom: 8 }} />}
+        <MediaThumb src={s.data.photo_url} style={{ width: "100%", maxHeight: 180, objectFit: "cover", borderRadius: 10, marginBottom: 8 }} />
         <div style={{ fontWeight: 600, fontSize: 14 }}>{s.data.nom}</div>
         <div style={{ fontSize: 12, color: "var(--c-text-muted)", marginTop: 3 }}>{t(lang, "plante_le")}{s.data.date}</div>
       </>
@@ -3897,15 +4185,6 @@ function MonArbre({ arbres, suivis, onAdd, onAddSuivi, lang, coordFormat }) {
   const [nom, setNom] = useState("");
   const [photo, setPhoto] = useState(null);
   const [suiviOuvert, setSuiviOuvert] = useState(null);
-  const fileRef = useRef(null);
-
-  function handlePhoto(e) {
-    const f = e.target.files && e.target.files[0];
-    if (!f) return;
-    const reader = new FileReader();
-    reader.onload = async () => setPhoto(await compressImage(reader.result));
-    reader.readAsDataURL(f);
-  }
 
   function submit() {
     if (!nom.trim()) return;
@@ -3947,14 +4226,7 @@ function MonArbre({ arbres, suivis, onAdd, onAddSuivi, lang, coordFormat }) {
       )}
       {showForm && (
         <div style={{ background: "var(--c-surface)", borderRadius: 14, padding: 14, border: "1px solid var(--c-border)", marginBottom: 16 }}>
-          <input ref={fileRef} type="file" accept="image/*" onChange={handlePhoto} style={{ display: "none" }} />
-          {photo ? (
-            <img src={photo} style={{ width: "100%", borderRadius: 10, maxHeight: 130, objectFit: "cover", marginBottom: 10 }} />
-          ) : (
-            <button onClick={() => fileRef.current.click()} style={{ width: "100%", border: "1.5px dashed var(--c-text-faint)", borderRadius: 10, padding: 14, background: "var(--c-surface-dashed)", color: "var(--c-text-secondary)", cursor: "pointer", marginBottom: 10, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: 12 }}>
-              <IconCamera size={16} /> Photo de l'arbre
-            </button>
-          )}
+          <PhotoCaptureButton photo={photo} onChange={setPhoto} label="Photo de l'arbre" previewMaxHeight={130} />
           <input value={nom} onChange={e => setNom(e.target.value)} placeholder="Espèce (ex : Manguier, Teck...)" style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10, boxSizing: "border-box" }} />
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={() => setShowForm(false)} style={{ flex: 1, padding: "10px 0", borderRadius: 10, border: "1px solid var(--c-border)", background: "var(--c-surface)", cursor: "pointer", fontSize: 13 }}>Annuler</button>
@@ -3979,7 +4251,7 @@ function MonArbre({ arbres, suivis, onAdd, onAddSuivi, lang, coordFormat }) {
             <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
               <div style={{ position: "relative", width: 56, height: 56, flexShrink: 0 }}>
                 {a.photo_url ? (
-                  <img src={a.photo_url} style={{ width: 56, height: 56, borderRadius: "50%", objectFit: "cover", border: "3px solid var(--c-bg)" }} />
+                  <MediaThumbSmall src={a.photo_url} style={{ width: 56, height: 56, borderRadius: "50%", objectFit: "cover", border: "3px solid var(--c-bg)" }} />
                 ) : (
                   <>
                     <TreeRing pct={growth(a)} />
@@ -4023,26 +4295,10 @@ function SuiviForm({ onSave, onCancel }) {
   const [etat, setEtat] = useState("vivant");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
-  const fileRef = useRef(null);
-
-  function handlePhoto(e) {
-    const f = e.target.files && e.target.files[0];
-    if (!f) return;
-    const reader = new FileReader();
-    reader.onload = async () => setPhoto(await compressImage(reader.result));
-    reader.readAsDataURL(f);
-  }
 
   return (
     <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--c-border-soft)" }}>
-      <input ref={fileRef} type="file" accept="image/*" onChange={handlePhoto} style={{ display: "none" }} />
-      {photo ? (
-        <img src={photo} style={{ width: "100%", borderRadius: 10, maxHeight: 120, objectFit: "cover", marginBottom: 8 }} />
-      ) : (
-        <button onClick={() => fileRef.current.click()} style={{ width: "100%", border: "1.5px dashed var(--c-text-faint)", borderRadius: 10, padding: 12, background: "var(--c-surface-dashed)", color: "var(--c-text-secondary)", cursor: "pointer", marginBottom: 8, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: 12 }}>
-          <IconCamera size={15} /> Photo de suivi
-        </button>
-      )}
+      <PhotoCaptureButton photo={photo} onChange={setPhoto} label="Photo de suivi" previewMaxHeight={120} compact />
       <select value={etat} onChange={e => setEtat(e.target.value)} style={{ width: "100%", padding: 8, borderRadius: 8, border: "1px solid var(--c-border)", fontSize: 12.5, marginBottom: 8, boxSizing: "border-box" }}>
         {Object.entries(ETAT_SUIVI).map(([id, v]) => <option key={id} value={id}>{v.label}</option>)}
       </select>
@@ -4580,15 +4836,6 @@ function Biodiversite({ observations, onAdd, onBack, lang }) {
   const [description, setDescription] = useState("");
   const [photo, setPhoto] = useState(null);
   const [busy, setBusy] = useState(false);
-  const fileRef = useRef(null);
-
-  function handlePhoto(e) {
-    const f = e.target.files && e.target.files[0];
-    if (!f) return;
-    const reader = new FileReader();
-    reader.onload = async () => setPhoto(await compressImage(reader.result));
-    reader.readAsDataURL(f);
-  }
 
   function submit() {
     if (!espece.trim()) return;
@@ -4618,14 +4865,7 @@ function Biodiversite({ observations, onAdd, onBack, lang }) {
         </button>
       ) : (
         <div style={{ background: "var(--c-surface)", borderRadius: 14, padding: 14, border: "1px solid var(--c-border)", marginBottom: 16 }}>
-          <input ref={fileRef} type="file" accept="image/*" onChange={handlePhoto} style={{ display: "none" }} />
-          {photo ? (
-            <img src={photo} style={{ width: "100%", borderRadius: 10, maxHeight: 130, objectFit: "cover", marginBottom: 10 }} />
-          ) : (
-            <button onClick={() => fileRef.current.click()} style={{ width: "100%", border: "1.5px dashed var(--c-text-faint)", borderRadius: 10, padding: 14, background: "var(--c-surface-dashed)", color: "var(--c-text-secondary)", cursor: "pointer", marginBottom: 10, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: 12 }}>
-              <IconCamera size={16} /> {t(lang, "photo_espece")}
-            </button>
-          )}
+          <PhotoCaptureButton photo={photo} onChange={setPhoto} label={t(lang, "photo_espece")} previewMaxHeight={130} />
           <input value={espece} onChange={e => setEspece(e.target.value)} placeholder={t(lang, "espece_placeholder")}
             style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
           <textarea value={description} onChange={e => setDescription(e.target.value)} rows={2} placeholder={t(lang, "remarques_placeholder")}
@@ -4641,7 +4881,7 @@ function Biodiversite({ observations, onAdd, onBack, lang }) {
         {observations.length === 0 && <div style={{ color: "var(--c-text-muted)", fontSize: 13, textAlign: "center", padding: 20 }}>{t(lang, "aucune_observation_partagee")}</div>}
         {[...observations].reverse().map(o => (
           <div key={o.id} style={{ background: "var(--c-surface)", borderRadius: 14, padding: 12, border: "1px solid var(--c-border)" }}>
-            {o.photo_url && <img src={o.photo_url} style={{ width: "100%", maxHeight: 150, objectFit: "cover", borderRadius: 10, marginBottom: 8 }} />}
+            <MediaThumb src={o.photo_url} style={{ width: "100%", maxHeight: 150, objectFit: "cover", borderRadius: 10, marginBottom: 8 }} />
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }}>
               <IconPaw size={14} color="var(--c-accent)" />
               <div style={{ fontWeight: 600, fontSize: 13 }}>{o.espece}</div>
@@ -4732,7 +4972,6 @@ function EspaceOrganisation({ organisationEmail, onBack }) {
   const [photoArbre, setPhotoArbre] = useState(null);
   const [busyArbre, setBusyArbre] = useState(false);
   const [erreurArbre, setErreurArbre] = useState("");
-  const fileArbreRef = useRef(null);
   // Projets & activités de l'organisation
   const [mesProjets, setMesProjets] = useState(null);
   const [showFormProjet, setShowFormProjet] = useState(false);
@@ -4994,14 +5233,6 @@ function EspaceOrganisation({ organisationEmail, onBack }) {
     setMessageActu("Actualité publiée.");
   }
 
-  function handlePhotoArbre(e) {
-    const f = e.target.files && e.target.files[0];
-    if (!f) return;
-    const reader = new FileReader();
-    reader.onload = async () => setPhotoArbre(await compressImage(reader.result));
-    reader.readAsDataURL(f);
-  }
-
   async function toggleSuppressionArbreOrg(a) {
     if (a.is_deleted) {
       const { error } = await supabase.from("arbres").update({ is_deleted: false, deleted_at: null, deleted_by: null }).eq("id", a.id);
@@ -5085,14 +5316,7 @@ function EspaceOrganisation({ organisationEmail, onBack }) {
 
       {showFormArbre && (
         <div style={{ background: "var(--c-surface)", borderRadius: 14, padding: 14, border: "1px solid var(--c-border)", marginBottom: 14 }}>
-          <input ref={fileArbreRef} type="file" accept="image/*" onChange={handlePhotoArbre} style={{ display: "none" }} />
-          {photoArbre ? (
-            <img src={photoArbre} style={{ width: "100%", borderRadius: 10, maxHeight: 130, objectFit: "cover", marginBottom: 10 }} />
-          ) : (
-            <button onClick={() => fileArbreRef.current && fileArbreRef.current.click()} style={{ width: "100%", padding: "10px 0", borderRadius: 10, border: "1px dashed var(--c-border)", background: "var(--c-surface-soft)", color: "var(--c-text-muted)", fontSize: 12.5, cursor: "pointer", marginBottom: 10 }}>
-              Ajouter une photo (optionnel)
-            </button>
-          )}
+          <PhotoCaptureButton photo={photoArbre} onChange={setPhotoArbre} label="Ajouter une photo (optionnel)" previewMaxHeight={130} />
           <input value={nomArbre} onChange={e => setNomArbre(e.target.value)} placeholder="Essence / nom de l'arbre (ex : Manguier, Teck…)"
             style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10, boxSizing: "border-box" }} />
           {erreurArbre && <div role="alert" style={{ fontSize: 12, color: "#B5451B", marginBottom: 10 }}>{erreurArbre}</div>}
@@ -5121,7 +5345,7 @@ function EspaceOrganisation({ organisationEmail, onBack }) {
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {mesArbres.map(a => (
               <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "var(--c-surface)", borderRadius: 10, padding: "8px 10px", border: "1px solid var(--c-border)", opacity: a.is_deleted ? 0.55 : 1 }}>
-                {a.photo_url ? <img src={a.photo_url} style={{ width: 36, height: 36, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} /> : <div style={{ width: 36, height: 36, borderRadius: 8, background: "var(--c-surface-soft)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><IconTree size={16} color="var(--c-text-muted)" /></div>}
+                {a.photo_url ? <MediaThumbSmall src={a.photo_url} style={{ width: 36, height: 36, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} /> : <div style={{ width: 36, height: 36, borderRadius: 8, background: "var(--c-surface-soft)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><IconTree size={16} color="var(--c-text-muted)" /></div>}
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 12.5, fontWeight: 600 }}>{a.nom}</div>
                   <div style={{ fontSize: 10.5, color: "var(--c-text-muted)" }}>{new Date(a.created_at).toLocaleDateString("fr-FR")}</div>
@@ -6864,7 +7088,7 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
               const pInfo = PRIORITE_INFO[priorite];
               return (
                 <div key={s.id} style={{ background: "var(--c-surface)", borderRadius: 14, padding: 12, border: "1px solid var(--c-border)" }}>
-                  {s.photo_url && <img src={s.photo_url} style={{ width: "100%", maxHeight: 130, objectFit: "cover", borderRadius: 10, marginBottom: 8 }} />}
+                  <MediaThumb src={s.photo_url} style={{ width: "100%", maxHeight: 130, objectFit: "cover", borderRadius: 10, marginBottom: 8 }} />
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 4 }}>
                     <div style={{ fontWeight: 600, fontSize: 13 }}>{cat.label}</div>
                     <span style={{ fontSize: 10, fontWeight: 600, color: u ? u.color : "#B5451B" }}>{u ? u.label : s.urgence}</span>
@@ -6985,7 +7209,7 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
           {[...arbres].reverse().map(a => (
             <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "var(--c-surface)", borderRadius: 12, padding: 10, border: "1px solid var(--c-border)" }}>
               {a.photo_url ? (
-                <img src={a.photo_url} style={{ width: 44, height: 44, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />
+                <MediaThumbSmall src={a.photo_url} style={{ width: 44, height: 44, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />
               ) : (
                 <div style={{ width: 44, height: 44, borderRadius: 8, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "var(--c-surface-soft)" }}>
                   <IconTree size={18} color="var(--c-accent)" />
