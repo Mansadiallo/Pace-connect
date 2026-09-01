@@ -323,14 +323,29 @@ function MediaThumbSmall({ src, style }) {
   return <img src={src} alt="" style={style} />;
 }
 
+// Échappement HTML pour toute donnée saisie par un utilisateur (nom d'arbre, espèce
+// observée, nom de zone, etc.) avant insertion dans une chaîne HTML brute (popups Leaflet,
+// qui n'utilisent pas JSX et n'ont donc pas l'échappement automatique de React). Sans cela,
+// un utilisateur pourrait saisir p.ex. `<img src=x onerror=...>` comme "espèce" ou "essence
+// d'arbre" et l'exécuter dans le navigateur de toute personne consultant la carte (XSS stocké).
+function escapeHtml(str) {
+  return String(str == null ? "" : str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 // Équivalent en chaîne HTML brute, pour les popups Leaflet qui n'utilisent pas JSX.
 function mediaHtml(url, maxHeight = 110) {
   if (!url) return "";
   const baseStyle = `width:100%;max-height:${maxHeight}px;object-fit:cover;border-radius:8px;margin-top:6px`;
+  const safeUrl = escapeHtml(url);
   if (isVideoUrl(url)) {
-    return `<video src="${url}" style="${baseStyle};background:#000" controls playsInline muted></video>`;
+    return `<video src="${safeUrl}" style="${baseStyle};background:#000" controls playsInline muted></video>`;
   }
-  return `<img src="${url}" style="${baseStyle}" />`;
+  return `<img src="${safeUrl}" style="${baseStyle}" />`;
 }
 
 // --- Appareil photo intégré (aperçu live + capture photo ET vidéo, sans quitter l'app) ---
@@ -2617,7 +2632,7 @@ function Accueil({ signalements, arbres, notifState, onEnableNotif, onOpenAdmin,
 const ENV_ICON_MAP = { IconTrash, IconDroplet, IconTree, IconFlame, IconPick, IconAlert, IconPaw, IconFish, IconWind, IconLayers, IconWaves, IconFlask, IconHome, IconSun, IconSprout, IconGlobe };
 function envIcon(nom) { return ENV_ICON_MAP[nom] || IconAlert; }
 
-function Signaler({ onSubmit, lang }) {
+function Signaler({ onSubmit, lang, coordFormat }) {
   const [step, setStep] = useState(1); // 1 = défi, 2 = problème (mode dynamique uniquement), 3 = détails
   const [defiChoisi, setDefiChoisi] = useState(null);
   const [categorie, setCategorie] = useState(null);
@@ -2627,6 +2642,7 @@ function Signaler({ onSubmit, lang }) {
   const [photo, setPhoto] = useState(null);
   const [donneesCollecte, setDonneesCollecte] = useState({});
   const [sent, setSent] = useState(false);
+  const [gpsFix, setGpsFix] = useState(null);
 
   // Taxonomie dynamique (défis/problèmes publiés par le super-admin). Tant que rien n'est
   // publié, `defisPublies` reste vide et le formulaire se comporte exactement comme avant
@@ -2658,10 +2674,15 @@ function Signaler({ onSubmit, lang }) {
       setSent(true);
       setTimeout(() => {
         setSent(false); setStep(1); setDefiChoisi(null); setCategorie(null); setProblemeChoisi(null);
-        setDescription(""); setPhoto(null); setUrgence("moyenne"); setDonneesCollecte({});
+        setDescription(""); setPhoto(null); setUrgence("moyenne"); setDonneesCollecte({}); setGpsFix(null);
       }, 1800);
     };
-    if (navigator.geolocation) {
+    // Priorité au relevé GPS visible dans le formulaire (widget LocationPrecision), que
+    // l'utilisateur a pu vérifier avant l'envoi. On ne retente un relevé "à l'aveugle" que
+    // si ce widget n'a encore rien capté (ex. permission accordée tardivement).
+    if (gpsFix && gpsFix.lat != null && gpsFix.lng != null) {
+      finalize(gpsFix.lat, gpsFix.lng);
+    } else if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => finalize(pos.coords.latitude, pos.coords.longitude),
         () => finalize(AFRICA_CENTER[0], AFRICA_CENTER[1]),
@@ -2794,7 +2815,9 @@ function Signaler({ onSubmit, lang }) {
             </div>
           )}
 
-          <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 12, fontSize: 12, color: "var(--c-text-muted)" }}><IconMapPin size={14} /> {t(lang, "gps_auto")}</div>
+          <div style={{ marginTop: 12 }}>
+            <LocationPrecision coordFormat={coordFormat} onUpdate={setGpsFix} />
+          </div>
         </div>
       )}
       <div style={{ display: "flex", gap: 10, marginTop: 22 }}>
@@ -2872,6 +2895,97 @@ function formatCap(deg) {
 function formatVitesse(ms) {
   if (ms == null || isNaN(ms)) return "—";
   return `${(ms * 3.6).toFixed(1)} km/h`;
+}
+
+// Widget de précision GPS réutilisable, à intégrer directement dans un formulaire
+// (Signaler, Mon Arbre, Biodiversité, Espace Organisation) pour que le citoyen VOIT ses
+// coordonnées et leur marge d'erreur avant d'envoyer, plutôt qu'un relevé unique pris en
+// silence au moment de l'envoi (avec un repli invisible vers un point par défaut en cas
+// d'échec, source d'erreurs de localisation). Suit la position en direct (watchPosition) le
+// temps que le formulaire reste ouvert, et remonte le dernier relevé fiable via onUpdate
+// pour que le composant parent l'utilise à l'envoi.
+function LocationPrecision({ coordFormat, onUpdate, compact = false }) {
+  const [gps, setGps] = useState(null);
+  const [error, setError] = useState(null);
+  const watchIdRef = useRef(null);
+  const onUpdateRef = useRef(onUpdate);
+  onUpdateRef.current = onUpdate;
+
+  function start() {
+    if (!navigator.geolocation) { setError("unsupported"); return; }
+    setError(null);
+    watchIdRef.current = navigator.geolocation.watchPosition(
+      (pos) => {
+        const data = {
+          lat: pos.coords.latitude, lng: pos.coords.longitude,
+          accuracy: pos.coords.accuracy, altitude: pos.coords.altitude,
+          speed: pos.coords.speed, heading: pos.coords.heading,
+          timestamp: pos.timestamp,
+        };
+        setGps(data);
+        if (onUpdateRef.current) onUpdateRef.current(data);
+      },
+      (err) => setError(err && err.code === 1 ? "permission" : "unavailable"),
+      { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 }
+    );
+  }
+
+  useEffect(() => {
+    start();
+    return () => {
+      if (watchIdRef.current != null && navigator.geolocation) { navigator.geolocation.clearWatch(watchIdRef.current); watchIdRef.current = null; }
+    };
+  }, []);
+
+  function refresh() {
+    if (watchIdRef.current != null && navigator.geolocation) { navigator.geolocation.clearWatch(watchIdRef.current); watchIdRef.current = null; }
+    setGps(null);
+    start();
+  }
+
+  const qualite = gps ? gpsQualite(gps.accuracy) : null;
+  const imprecise = !!(gps && gps.accuracy != null && gps.accuracy > 50);
+
+  return (
+    <div style={{ background: "var(--c-surface-soft)", borderRadius: compact ? 10 : 12, padding: compact ? 9 : 11, marginBottom: compact ? 8 : 10, fontSize: 11.5, border: imprecise ? "1px solid #B5451B55" : "1px solid var(--c-border-soft)" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--c-text)", fontWeight: 600 }}>
+          <IconTarget size={13} color="var(--c-text-muted)" /> Position GPS
+        </div>
+        <button type="button" onClick={refresh} title="Actualiser la position" aria-label="Actualiser la position" style={{ background: "none", border: "none", cursor: "pointer", padding: 3, display: "flex", color: "var(--c-text-muted)" }}>
+          <IconRotateCcw size={13} />
+        </button>
+      </div>
+      {error ? (
+        <div style={{ color: "#B5451B", marginTop: 5, lineHeight: 1.5 }}>
+          {error === "permission"
+            ? "Localisation refusée. Autorise l'accès à la position dans les réglages du navigateur pour des coordonnées fiables."
+            : error === "unsupported"
+              ? "La géolocalisation n'est pas disponible sur cet appareil."
+              : "Signal GPS introuvable pour le moment — réessaie dans quelques secondes."}
+        </div>
+      ) : !gps ? (
+        <div style={{ color: "var(--c-text-muted)", marginTop: 5, display: "flex", alignItems: "center", gap: 6 }}>
+          <IconClock size={12} /> Recherche du signal GPS…
+        </div>
+      ) : (
+        <React.Fragment>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 5 }}>
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: qualite.couleur, display: "inline-block", flexShrink: 0 }} />
+            <span style={{ color: "var(--c-text-secondary)" }}>Précision {qualite.label.toLowerCase()} — ±{Math.round(gps.accuracy)} m</span>
+          </div>
+          <div style={{ marginTop: 4, fontFamily: "IBM Plex Mono, monospace", color: "var(--c-text)", fontSize: 11 }}>
+            {formatCoordonnees(gps.lat, gps.lng, coordFormat)}
+          </div>
+          {imprecise && (
+            <div style={{ marginTop: 5, color: "#B5451B", lineHeight: 1.5 }}>
+              Précision faible : sors à l'air libre ou attends quelques secondes avant d'envoyer, pour éviter une localisation erronée.
+            </div>
+          )}
+        </React.Fragment>
+      )}
+    </div>
+  );
 }
 
 // ===== Cache de tuiles hors-ligne (IndexedDB) =====
@@ -3601,7 +3715,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
         const pendingHtml = !a.valide ? `<div style="font-size:11px;color:#B5451B;margin-top:4px">⏳ ${t(lang, "en_attente_validation")}</div>` : "";
         L.marker([a.lat, a.lng], { icon, opacity: a.valide ? 1 : 0.6 }).addTo(layerRef.current)
           .on("click", () => setSelected({ type: "arbre", data: a }))
-          .bindPopup(`<b>${a.nom}</b><br/>${t(lang, "plante_le")}${a.date}${photoHtml}${pendingHtml}`);
+          .bindPopup(`<b>${escapeHtml(a.nom)}</b><br/>${t(lang, "plante_le")}${a.date}${photoHtml}${pendingHtml}`);
       });
     }
 
@@ -3621,7 +3735,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
         const pendingHtml = !s.valide ? `<div style="font-size:11px;color:#B5451B;margin-top:4px">⏳ ${t(lang, "en_attente_validation")}</div>` : "";
         L.marker([s.lat, s.lng], { icon, opacity: s.valide ? 1 : 0.6 }).addTo(layerRef.current)
           .on("click", () => setSelected({ type: "signalement", data: s }))
-          .bindPopup(`<b>${categorieLabel(lang, cat.id)}</b><br/>${s.date}${photoHtml}${pendingHtml}`);
+          .bindPopup(`<b>${escapeHtml(categorieLabel(lang, cat.id))}</b><br/>${s.date}${photoHtml}${pendingHtml}`);
       });
     }
 
@@ -3634,7 +3748,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
         const photoHtml = mediaHtml(o.photo_url, 110);
         L.marker([o.lat, o.lng], { icon }).addTo(layerRef.current)
           .on("click", () => setSelected({ type: "observation", data: o }))
-          .bindPopup(`<b>${o.espece || t(lang, "observation_generique")}</b><br/>${new Date(o.created_at).toLocaleDateString("fr-FR")}${photoHtml}`);
+          .bindPopup(`<b>${o.espece ? escapeHtml(o.espece) : t(lang, "observation_generique")}</b><br/>${new Date(o.created_at).toLocaleDateString("fr-FR")}${photoHtml}`);
       });
     }
 
@@ -3648,7 +3762,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
     if (!showZones) return;
     zonesLocales.forEach(z => {
       const icon = L.divIcon({ html: markerHtml("var(--c-warning)", "pin"), className: "", iconSize: [26, 26], iconAnchor: [13, 26] });
-      L.marker([z.lat, z.lng], { icon }).addTo(zonesLayerRef.current).bindPopup(`<b>${z.nom}</b><br/>${t(lang, "zone_enregistree_localement")}`);
+      L.marker([z.lat, z.lng], { icon }).addTo(zonesLayerRef.current).bindPopup(`<b>${escapeHtml(z.nom)}</b><br/>${t(lang, "zone_enregistree_localement")}`);
     });
   }, [zonesLocales, showZones]);
 
@@ -4185,14 +4299,17 @@ function MonArbre({ arbres, suivis, onAdd, onAddSuivi, lang, coordFormat }) {
   const [nom, setNom] = useState("");
   const [photo, setPhoto] = useState(null);
   const [suiviOuvert, setSuiviOuvert] = useState(null);
+  const [gpsFix, setGpsFix] = useState(null);
 
   function submit() {
     if (!nom.trim()) return;
     const finalize = (lat, lng) => {
       onAdd({ nom, photo, lat, lng });
-      setNom(""); setPhoto(null); setShowForm(false);
+      setNom(""); setPhoto(null); setShowForm(false); setGpsFix(null);
     };
-    if (navigator.geolocation) {
+    if (gpsFix && gpsFix.lat != null && gpsFix.lng != null) {
+      finalize(gpsFix.lat, gpsFix.lng);
+    } else if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => finalize(pos.coords.latitude, pos.coords.longitude),
         () => finalize(AFRICA_CENTER[0], AFRICA_CENTER[1]),
@@ -4228,6 +4345,7 @@ function MonArbre({ arbres, suivis, onAdd, onAddSuivi, lang, coordFormat }) {
         <div style={{ background: "var(--c-surface)", borderRadius: 14, padding: 14, border: "1px solid var(--c-border)", marginBottom: 16 }}>
           <PhotoCaptureButton photo={photo} onChange={setPhoto} label="Photo de l'arbre" previewMaxHeight={130} />
           <input value={nom} onChange={e => setNom(e.target.value)} placeholder="Espèce (ex : Manguier, Teck...)" style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10, boxSizing: "border-box" }} />
+          <LocationPrecision coordFormat={coordFormat} onUpdate={setGpsFix} compact />
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={() => setShowForm(false)} style={{ flex: 1, padding: "10px 0", borderRadius: 10, border: "1px solid var(--c-border)", background: "var(--c-surface)", cursor: "pointer", fontSize: 13 }}>Annuler</button>
             <button onClick={submit} style={{ flex: 1, padding: "10px 0", borderRadius: 10, border: "none", background: "var(--c-accent)", color: "#fff", fontWeight: 600, cursor: "pointer", fontSize: 13 }}>Enregistrer</button>
@@ -4830,22 +4948,25 @@ function BenevoleAccesBloque({ statut }) {
   );
 }
 
-function Biodiversite({ observations, onAdd, onBack, lang }) {
+function Biodiversite({ observations, onAdd, onBack, lang, coordFormat }) {
   const [showForm, setShowForm] = useState(false);
   const [espece, setEspece] = useState("");
   const [description, setDescription] = useState("");
   const [photo, setPhoto] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [gpsFix, setGpsFix] = useState(null);
 
   function submit() {
     if (!espece.trim()) return;
     setBusy(true);
     const finalize = (lat, lng) => {
       onAdd({ espece, description, photo, lat, lng }).finally(() => {
-        setBusy(false); setEspece(""); setDescription(""); setPhoto(null); setShowForm(false);
+        setBusy(false); setEspece(""); setDescription(""); setPhoto(null); setShowForm(false); setGpsFix(null);
       });
     };
-    if (navigator.geolocation) {
+    if (gpsFix && gpsFix.lat != null && gpsFix.lng != null) {
+      finalize(gpsFix.lat, gpsFix.lng);
+    } else if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => finalize(pos.coords.latitude, pos.coords.longitude),
         () => finalize(AFRICA_CENTER[0], AFRICA_CENTER[1]),
@@ -4870,6 +4991,7 @@ function Biodiversite({ observations, onAdd, onBack, lang }) {
             style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
           <textarea value={description} onChange={e => setDescription(e.target.value)} rows={2} placeholder={t(lang, "remarques_placeholder")}
             style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10, boxSizing: "border-box", resize: "none", fontFamily: "Work Sans, sans-serif" }} />
+          <LocationPrecision coordFormat={coordFormat} onUpdate={setGpsFix} compact />
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={() => setShowForm(false)} style={{ flex: 1, padding: "10px 0", borderRadius: 10, border: "1px solid var(--c-border)", background: "var(--c-surface)", cursor: "pointer", fontSize: 13 }}>{t(lang, "annuler")}</button>
             <button onClick={submit} disabled={busy} style={{ flex: 1, padding: "10px 0", borderRadius: 10, border: "none", background: "var(--c-accent)", color: "#fff", fontWeight: 600, cursor: "pointer", fontSize: 13 }}>{busy ? t(lang, "envoi_en_cours") : t(lang, "enregistrer")}</button>
@@ -4953,7 +5075,7 @@ function buildPaceStatsReplies(signalements, arbres, observations, actualites) {
   };
 }
 
-function EspaceOrganisation({ organisationEmail, onBack }) {
+function EspaceOrganisation({ organisationEmail, onBack, coordFormat }) {
   const [org, setOrg] = useState(null);
   const [signalements, setSignalements] = useState(null);
   const [defisNoms, setDefisNoms] = useState({});
@@ -4972,6 +5094,7 @@ function EspaceOrganisation({ organisationEmail, onBack }) {
   const [photoArbre, setPhotoArbre] = useState(null);
   const [busyArbre, setBusyArbre] = useState(false);
   const [erreurArbre, setErreurArbre] = useState("");
+  const [gpsFixArbre, setGpsFixArbre] = useState(null);
   // Projets & activités de l'organisation
   const [mesProjets, setMesProjets] = useState(null);
   const [showFormProjet, setShowFormProjet] = useState(false);
@@ -5257,7 +5380,7 @@ function EspaceOrganisation({ organisationEmail, onBack }) {
           valide: false, publie: false, is_deleted: false,
         });
         if (error) throw error;
-        setNomArbre(""); setPhotoArbre(null); setShowFormArbre(false);
+        setNomArbre(""); setPhotoArbre(null); setShowFormArbre(false); setGpsFixArbre(null);
         chargerArbres(org);
       } catch (err) {
         setErreurArbre("Échec de l'enregistrement : " + (err.message || "erreur inconnue"));
@@ -5265,7 +5388,9 @@ function EspaceOrganisation({ organisationEmail, onBack }) {
         setBusyArbre(false);
       }
     };
-    if (navigator.geolocation) {
+    if (gpsFixArbre && gpsFixArbre.lat != null && gpsFixArbre.lng != null) {
+      finalize(gpsFixArbre.lat, gpsFixArbre.lng);
+    } else if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => finalize(pos.coords.latitude, pos.coords.longitude),
         () => finalize(AFRICA_CENTER[0], AFRICA_CENTER[1]),
@@ -5320,14 +5445,14 @@ function EspaceOrganisation({ organisationEmail, onBack }) {
           <input value={nomArbre} onChange={e => setNomArbre(e.target.value)} placeholder="Essence / nom de l'arbre (ex : Manguier, Teck…)"
             style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10, boxSizing: "border-box" }} />
           {erreurArbre && <div role="alert" style={{ fontSize: 12, color: "#B5451B", marginBottom: 10 }}>{erreurArbre}</div>}
-          <div style={{ fontSize: 11, color: "var(--c-text-muted)", marginBottom: 10 }}>La position GPS de l'appareil sera utilisée pour géolocaliser la plantation.</div>
+          <LocationPrecision coordFormat={coordFormat} onUpdate={setGpsFixArbre} compact />
           <button onClick={planterArbreOrganisation} disabled={busyArbre || !nomArbre.trim()} style={{
             padding: "9px 14px", borderRadius: 10, border: "none",
             background: (!nomArbre.trim()) ? "var(--c-text-faint)" : "var(--c-accent-dark)", color: "#fff", fontWeight: 600, fontSize: 12.5,
             cursor: (!nomArbre.trim()) ? "default" : "pointer", marginRight: 8 }}>
             {busyArbre ? "…" : "Enregistrer"}
           </button>
-          <button onClick={() => { setShowFormArbre(false); setErreurArbre(""); setNomArbre(""); setPhotoArbre(null); }} style={{ padding: "9px 14px", borderRadius: 10, border: "1px solid var(--c-border)", background: "var(--c-surface)", color: "var(--c-text-secondary)", fontWeight: 600, fontSize: 12.5, cursor: "pointer" }}>
+          <button onClick={() => { setShowFormArbre(false); setErreurArbre(""); setNomArbre(""); setPhotoArbre(null); setGpsFixArbre(null); }} style={{ padding: "9px 14px", borderRadius: 10, border: "1px solid var(--c-border)", background: "var(--c-surface)", color: "var(--c-text-secondary)", fontWeight: 600, fontSize: 12.5, cursor: "pointer" }}>
             Annuler
           </button>
         </div>
@@ -9631,11 +9756,11 @@ function App() {
             <IconClock size={15} /> Vérification de l'accès…
           </div>
         ) : tab === "biodiversite" && accesEtendu ? (
-          <Biodiversite observations={observations} onAdd={addObservation} onBack={() => setTab("accueil")} lang={lang} />
+          <Biodiversite observations={observations} onAdd={addObservation} onBack={() => setTab("accueil")} lang={lang} coordFormat={coordFormat} />
         ) : tab === "assistant" && accesEtendu ? (
           <AssistantIA onBack={() => setTab("accueil")} signalements={signalements} arbres={arbres} observations={observations} actualites={actualites} />
         ) : tab === "espace_org" && estOrganisationValidee ? (
-          <EspaceOrganisation organisationEmail={citoyenSession && citoyenSession.user && citoyenSession.user.email} onBack={() => setTab("accueil")} />
+          <EspaceOrganisation organisationEmail={citoyenSession && citoyenSession.user && citoyenSession.user.email} onBack={() => setTab("accueil")} coordFormat={coordFormat} />
         ) : tab === "evenements" ? (
           <Evenements onBack={() => setTab("accueil")} />
         ) : tab === "groupes_terrain" ? (
@@ -9644,7 +9769,7 @@ function App() {
           <div key={tab} className="pace-fade-in">
             {tab === "accueil" && <Accueil signalements={signalements.filter(s => s.device_id === DEVICE_ID)} arbres={arbres.filter(a => a.device_id === DEVICE_ID)} notifState={notifState} onEnableNotif={enableNotif} onOpenAdmin={() => setShowAdmin(true)} actualites={actualites} onNavigate={setTab} lang={lang} estBenevoleValide={estBenevoleValide} benevoleStatut={benevoleStatut} onBenevoleInscrit={() => { setBenevoleStatut("en_attente"); try { localStorage.setItem("pace-benevole-statut", "en_attente"); } catch (e) {} }} estOrganisationValidee={estOrganisationValidee} organisationStatut={organisationStatut} onBasculerStatutSignalement={citoyenBasculerStatutSignalement} />}
             {tab === "carte" && accesEtendu && <Carte signalements={signalements} arbres={arbres} observations={observations} onAddSignalement={addSignalement} onAddArbre={addArbre} onAddObservation={addObservation} online={online} pendingQueueCount={pendingQueueCount} onFlushQueue={flushPendingQueue} lang={lang} coordFormat={coordFormat} />}
-            {tab === "signaler" && accesEtendu && <Signaler onSubmit={addSignalement} lang={lang} />}
+            {tab === "signaler" && accesEtendu && <Signaler onSubmit={addSignalement} lang={lang} coordFormat={coordFormat} />}
             {tab === "arbre" && accesEtendu && <MonArbre arbres={arbres.filter(a => a.device_id === DEVICE_ID)} suivis={suivis} onAdd={addArbre} onAddSuivi={addSuivi} lang={lang} coordFormat={coordFormat} />}
           </div>
         )}
