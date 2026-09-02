@@ -167,7 +167,6 @@ const IconMapPin = (p) => <Icon {...p} path={<><path d="M20 10c0 6-8 12-8 12s-8-
 const IconTree = (p) => <Icon {...p} path={<><path d="M12 22v-7"/><path d="M9 9a3 3 0 1 1 6 0c0 2-2 3-3 3s-3-1-3-3z"/><path d="M6 13a4 4 0 1 1 8 0c0 2.2-2 4-4 4s-4-1.8-4-4z"/><path d="M10 6a2.5 2.5 0 1 1 5 0c0 1.6-1.5 2.5-2.5 2.5S10 7.6 10 6z"/></>} />;
 const IconAlert = (p) => <Icon {...p} path={<><path d="M10.3 3.9 1.8 18a1.8 1.8 0 0 0 1.5 2.7h17.4a1.8 1.8 0 0 0 1.5-2.7L13.7 3.9a1.8 1.8 0 0 0-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></>} />;
 const IconCamera = (p) => <Icon {...p} path={<><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></>} />;
-const IconImage = (p) => <Icon {...p} path={<><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></>} />;
 const IconX = (p) => <Icon {...p} path={<><path d="M18 6 6 18"/><path d="M6 6l12 12"/></>} />;
 const IconChevronLeft = (p) => <Icon {...p} path={<path d="M15 18l-6-6 6-6"/>} />;
 const IconFlame = (p) => <Icon {...p} path={<path d="M12 2c1 3-2 4-2 7a3 3 0 0 0 6 0c2 1 3 3 3 5a7 7 0 0 1-14 0c0-4 3-5 4-9 1 2 2 2 3-3z"/>} />;
@@ -290,327 +289,6 @@ async function uploadPhotoGeneric(dataUrl, prefix) {
     console.error("Erreur d'upload photo :", e);
     return null;
   }
-}
-
-// Les signalements/arbres/observations peuvent désormais porter une photo OU une courte vidéo
-// (même champ "photo_url" / "photo" côté stockage) : ce helper distingue les deux par extension
-// pour choisir entre <img> et <video> à l'affichage, sans changer le schéma de données.
-function isVideoUrl(url) {
-  if (!url) return false;
-  return /\.(webm|mp4|mov|m4v|ogg)(\?|$)/i.test(url) || (typeof url === "string" && url.startsWith("blob:"));
-}
-
-// Composant d'affichage unifié (miniature/aperçu) pour un média photo ou vidéo.
-function MediaThumb({ src, style, controls = true }) {
-  if (!src) return null;
-  if (isVideoUrl(src)) {
-    return <video src={src} controls={controls} playsInline muted={!controls} style={style} />;
-  }
-  return <img src={src} alt="" style={style} />;
-}
-
-// Variante compacte pour les petites vignettes (listes) : affiche un pictogramme lecture
-// plutôt qu'une balise <video> peu lisible en dessous d'une cinquantaine de pixels.
-function MediaThumbSmall({ src, style }) {
-  if (!src) return null;
-  if (isVideoUrl(src)) {
-    return (
-      <div style={{ ...style, background: "#17211C", display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <IconPlay size={Math.max(12, Math.round(((style && style.width) || 40) * 0.4))} color="#fff" />
-      </div>
-    );
-  }
-  return <img src={src} alt="" style={style} />;
-}
-
-// Échappement HTML pour toute donnée saisie par un utilisateur (nom d'arbre, espèce
-// observée, nom de zone, etc.) avant insertion dans une chaîne HTML brute (popups Leaflet,
-// qui n'utilisent pas JSX et n'ont donc pas l'échappement automatique de React). Sans cela,
-// un utilisateur pourrait saisir p.ex. `<img src=x onerror=...>` comme "espèce" ou "essence
-// d'arbre" et l'exécuter dans le navigateur de toute personne consultant la carte (XSS stocké).
-function escapeHtml(str) {
-  return String(str == null ? "" : str)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-// Équivalent en chaîne HTML brute, pour les popups Leaflet qui n'utilisent pas JSX.
-function mediaHtml(url, maxHeight = 110) {
-  if (!url) return "";
-  const baseStyle = `width:100%;max-height:${maxHeight}px;object-fit:cover;border-radius:8px;margin-top:6px`;
-  const safeUrl = escapeHtml(url);
-  if (isVideoUrl(url)) {
-    return `<video src="${safeUrl}" style="${baseStyle};background:#000" controls playsInline muted></video>`;
-  }
-  return `<img src="${safeUrl}" style="${baseStyle}" />`;
-}
-
-// --- Appareil photo intégré (aperçu live + capture photo ET vidéo, sans quitter l'app) ---
-const CAMERA_VIDEO_MAX_SECONDS = 60;
-
-function CameraCapture({ onCapture, onClose }) {
-  const videoRef = useRef(null);
-  const streamRef = useRef(null);
-  const audioStreamRef = useRef(null);
-  const recorderRef = useRef(null);
-  const chunksRef = useRef([]);
-  const timerRef = useRef(null);
-  const [facingMode, setFacingMode] = useState("environment");
-  const [error, setError] = useState(null);
-  const [ready, setReady] = useState(false);
-  const [mode, setMode] = useState("photo"); // "photo" | "video"
-  const [isRecording, setIsRecording] = useState(false);
-  const [elapsed, setElapsed] = useState(0);
-
-  function stopVideoStream() {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(tr => tr.stop());
-      streamRef.current = null;
-    }
-  }
-  function stopAudioStream() {
-    if (audioStreamRef.current) {
-      audioStreamRef.current.getTracks().forEach(tr => tr.stop());
-      audioStreamRef.current = null;
-    }
-  }
-
-  useEffect(() => {
-    let cancelled = false;
-    async function start() {
-      setReady(false);
-      setError(null);
-      stopVideoStream();
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: facingMode }, width: { ideal: 1280 }, height: { ideal: 1280 } },
-          audio: false,
-        });
-        if (cancelled) { stream.getTracks().forEach(tr => tr.stop()); return; }
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          try { await videoRef.current.play(); } catch (e) {}
-        }
-        if (!cancelled) setReady(true);
-      } catch (e) {
-        if (!cancelled) setError(e && e.name === "NotAllowedError" ? "permission" : "unavailable");
-      }
-    }
-    start();
-    return () => {
-      cancelled = true;
-      stopVideoStream();
-      stopAudioStream();
-      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-    };
-  }, [facingMode]);
-
-  function handleCapturePhoto() {
-    const video = videoRef.current;
-    if (!video || !video.videoWidth) return;
-    const canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
-    onCapture({ kind: "photo", dataUrl: canvas.toDataURL("image/jpeg", 0.85) });
-  }
-
-  async function startRecording() {
-    if (!streamRef.current || isRecording) return;
-    try {
-      const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      audioStreamRef.current = audioStream;
-      const combined = new MediaStream([
-        ...streamRef.current.getVideoTracks(),
-        ...audioStream.getAudioTracks(),
-      ]);
-      const candidates = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"];
-      const mimeType = candidates.find(c => window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(c)) || "";
-      const recorder = mimeType ? new MediaRecorder(combined, { mimeType }) : new MediaRecorder(combined);
-      chunksRef.current = [];
-      recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunksRef.current.push(e.data); };
-      recorder.onstop = () => {
-        const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "video/webm" });
-        chunksRef.current = [];
-        stopAudioStream();
-        onCapture({ kind: "video", blob, url: URL.createObjectURL(blob) });
-      };
-      recorderRef.current = recorder;
-      recorder.start();
-      setIsRecording(true);
-      setElapsed(0);
-      timerRef.current = setInterval(() => {
-        setElapsed(prev => {
-          const next = prev + 1;
-          if (next >= CAMERA_VIDEO_MAX_SECONDS) stopRecording();
-          return next;
-        });
-      }, 1000);
-    } catch (e) {
-      setError("permission");
-    }
-  }
-
-  function stopRecording() {
-    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-    if (recorderRef.current && recorderRef.current.state !== "inactive") {
-      recorderRef.current.stop();
-    }
-    setIsRecording(false);
-  }
-
-  function handleMainButton() {
-    if (mode === "photo") { handleCapturePhoto(); return; }
-    if (isRecording) stopRecording(); else startRecording();
-  }
-
-  function handleClose() {
-    if (isRecording) stopRecording();
-    onClose();
-  }
-
-  function fmtTime(s) {
-    const m = Math.floor(s / 60);
-    const sec = s % 60;
-    return `${m}:${String(sec).padStart(2, "0")}`;
-  }
-
-  return (
-    <div style={{ position: "fixed", inset: 0, background: "#000", zIndex: 4000, display: "flex", flexDirection: "column" }}>
-      <div style={{ position: "relative", flex: 1, overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center" }}>
-        {error ? (
-          <div style={{ color: "#fff", textAlign: "center", padding: 28, fontSize: 13, lineHeight: 1.5 }}>
-            {error === "permission"
-              ? "Accès à la caméra ou au micro refusé. Autorise l'accès dans les réglages du navigateur, ou choisis un fichier depuis la galerie."
-              : "Caméra indisponible sur cet appareil. Choisis un fichier depuis la galerie."}
-          </div>
-        ) : (
-          <video ref={videoRef} playsInline muted autoPlay style={{ width: "100%", height: "100%", objectFit: "cover", transform: facingMode === "user" ? "scaleX(-1)" : "none" }} />
-        )}
-        {isRecording && (
-          <div style={{ position: "absolute", top: 16, left: "50%", transform: "translateX(-50%)", background: "rgba(181,69,27,0.9)", color: "#fff", fontSize: 12.5, fontWeight: 600, padding: "5px 12px", borderRadius: 20, display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#fff", display: "inline-block" }} />
-            {fmtTime(elapsed)}
-          </div>
-        )}
-        <button onClick={handleClose} aria-label="Fermer la caméra" style={{ position: "absolute", top: 16, left: 16, background: "rgba(0,0,0,0.45)", border: "none", borderRadius: "50%", width: 38, height: 38, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
-          <IconX size={18} color="#fff" />
-        </button>
-        {!error && !isRecording && (
-          <button onClick={() => setFacingMode(m => m === "environment" ? "user" : "environment")} aria-label="Changer de caméra" style={{ position: "absolute", top: 16, right: 16, background: "rgba(0,0,0,0.45)", border: "none", borderRadius: "50%", width: 38, height: 38, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
-            <IconRotateCcw size={17} color="#fff" />
-          </button>
-        )}
-      </div>
-      <div style={{ background: "#000", padding: "14px 0 28px", display: "flex", flexDirection: "column", alignItems: "center", gap: 14 }}>
-        {error ? (
-          <button onClick={onClose} style={{ padding: "10px 22px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.3)", background: "transparent", color: "#fff", fontSize: 13, cursor: "pointer" }}>Fermer</button>
-        ) : (
-          <React.Fragment>
-            {!isRecording && (
-              <div style={{ display: "flex", gap: 6, background: "rgba(255,255,255,0.12)", borderRadius: 20, padding: 3 }}>
-                <button onClick={() => setMode("photo")} style={{ padding: "6px 16px", borderRadius: 16, border: "none", cursor: "pointer", fontSize: 12, fontWeight: 600, background: mode === "photo" ? "#fff" : "transparent", color: mode === "photo" ? "#17211C" : "#fff" }}>Photo</button>
-                <button onClick={() => setMode("video")} style={{ padding: "6px 16px", borderRadius: 16, border: "none", cursor: "pointer", fontSize: 12, fontWeight: 600, background: mode === "video" ? "#fff" : "transparent", color: mode === "video" ? "#17211C" : "#fff" }}>Vidéo</button>
-              </div>
-            )}
-            <button onClick={handleMainButton} disabled={!ready} aria-label={mode === "photo" ? "Prendre la photo" : (isRecording ? "Arrêter l'enregistrement" : "Démarrer l'enregistrement")} style={{
-              width: 68, height: 68, borderRadius: "50%", border: `4px solid ${mode === "video" ? "#B5451B" : "#fff"}`,
-              background: ready ? "rgba(255,255,255,0.15)" : "rgba(255,255,255,0.05)",
-              cursor: ready ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center" }}>
-              {mode === "video" && (
-                isRecording
-                  ? <span style={{ width: 22, height: 22, borderRadius: 5, background: "#B5451B" }} />
-                  : <span style={{ width: 50, height: 50, borderRadius: "50%", background: "#B5451B" }} />
-              )}
-            </button>
-            {mode === "video" && (
-              <div style={{ color: "rgba(255,255,255,0.7)", fontSize: 11 }}>
-                {isRecording ? `Max. ${CAMERA_VIDEO_MAX_SECONDS}s — appuie pour arrêter` : "Appuie pour filmer"}
-              </div>
-            )}
-          </React.Fragment>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// Bouton "photo/vidéo" réutilisable : ouvre la caméra intégrée par défaut (aperçu live,
-// capture photo ou enregistrement vidéo), avec repli vers le sélecteur de fichiers/galerie
-// si la caméra est indisponible ou refusée. La valeur de `photo` reste une simple chaîne
-// (data URL pour une image, URL blob locale pour une vidéo) afin de rester compatible avec
-// le flux d'upload existant (uploadPhoto/uploadPhotoGeneric font un fetch() de cette URL).
-function PhotoCaptureButton({ photo, onChange, label, previewMaxHeight = 160, compact = false }) {
-  const fileRef = useRef(null);
-  const [showCamera, setShowCamera] = useState(false);
-  const supportsCamera = typeof navigator !== "undefined" && navigator.mediaDevices && navigator.mediaDevices.getUserMedia;
-  const isVideo = isVideoUrl(photo);
-
-  function handleFile(e) {
-    const f = e.target.files && e.target.files[0];
-    if (!f) return;
-    if (f.type && f.type.startsWith("video/")) {
-      onChange(URL.createObjectURL(f));
-      e.target.value = "";
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = async () => onChange(await compressImage(reader.result));
-    reader.readAsDataURL(f);
-    e.target.value = "";
-  }
-
-  async function handleCapture(result) {
-    setShowCamera(false);
-    if (result.kind === "video") {
-      onChange(result.url);
-    } else {
-      onChange(await compressImage(result.dataUrl));
-    }
-  }
-
-  function handleRemove() {
-    if (isVideo) { try { URL.revokeObjectURL(photo); } catch (e) {} }
-    onChange(null);
-  }
-
-  return (
-    <React.Fragment>
-      <input ref={fileRef} type="file" accept="image/*,video/*" onChange={handleFile} style={{ display: "none" }} />
-      {showCamera && <CameraCapture onCapture={handleCapture} onClose={() => setShowCamera(false)} />}
-      {photo ? (
-        <div style={{ position: "relative", marginBottom: compact ? 8 : 10 }}>
-          {isVideo ? (
-            <video src={photo} controls playsInline style={{ width: "100%", borderRadius: compact ? 10 : 12, maxHeight: previewMaxHeight, objectFit: "cover", background: "#000" }} />
-          ) : (
-            <img src={photo} alt="Aperçu" style={{ width: "100%", borderRadius: compact ? 10 : 12, maxHeight: previewMaxHeight, objectFit: "cover" }} />
-          )}
-          <button onClick={handleRemove} style={{ position: "absolute", top: 8, right: 8, background: "var(--c-text)bb", border: "none", borderRadius: "50%", width: 26, height: 26, color: "#fff", cursor: "pointer" }}><IconX size={14} /></button>
-        </div>
-      ) : (
-        <div style={{ display: "flex", gap: 8, marginBottom: compact ? 8 : 10 }}>
-          <button onClick={() => supportsCamera ? setShowCamera(true) : fileRef.current.click()} style={{
-            flex: 1, border: "1.5px dashed var(--c-text-faint)", borderRadius: compact ? 10 : 12,
-            padding: compact ? 12 : 14, background: "var(--c-surface-dashed)", color: "var(--c-text-secondary)",
-            cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: compact ? 12 : 12.5 }}>
-            <IconCamera size={compact ? 15 : 16} /> {label || "Ajouter une photo"}
-          </button>
-          {supportsCamera && (
-            <button onClick={() => fileRef.current.click()} aria-label="Choisir depuis la galerie" title="Choisir depuis la galerie" style={{
-              width: compact ? 40 : 44, flexShrink: 0, border: "1.5px dashed var(--c-text-faint)", borderRadius: compact ? 10 : 12,
-              background: "var(--c-surface-dashed)", color: "var(--c-text-secondary)", cursor: "pointer",
-              display: "flex", alignItems: "center", justifyContent: "center" }}>
-              <IconImage size={compact ? 15 : 16} />
-            </button>
-          )}
-        </div>
-      )}
-    </React.Fragment>
-  );
 }
 
 // --- Signalisation d'appel (WebRTC via table pollée, pas de serveur dédié) ---
@@ -1027,7 +705,7 @@ async function logActivity(action, table, id, detail) {
   } catch (e) { /* journal best-effort, ne bloque jamais l'action principale */ }
 }
 
-// Journal d'audit propre à un groupe de terrain (traçabilité missions/affiliation/reconnaissance,
+// Journal d'audit propre à un groupe de terrain (traçabilité missions/affiliation/certification,
 // visible par les membres du groupe ET par son organisation affiliée — chaîne de redevabilité
 // complète bénévole ↔ groupe ↔ organisation).
 async function logGroupeAudit(groupeId, action, cibleType, cibleId, detail) {
@@ -2632,7 +2310,7 @@ function Accueil({ signalements, arbres, notifState, onEnableNotif, onOpenAdmin,
 const ENV_ICON_MAP = { IconTrash, IconDroplet, IconTree, IconFlame, IconPick, IconAlert, IconPaw, IconFish, IconWind, IconLayers, IconWaves, IconFlask, IconHome, IconSun, IconSprout, IconGlobe };
 function envIcon(nom) { return ENV_ICON_MAP[nom] || IconAlert; }
 
-function Signaler({ onSubmit, lang, coordFormat }) {
+function Signaler({ onSubmit, lang }) {
   const [step, setStep] = useState(1); // 1 = défi, 2 = problème (mode dynamique uniquement), 3 = détails
   const [defiChoisi, setDefiChoisi] = useState(null);
   const [categorie, setCategorie] = useState(null);
@@ -2642,7 +2320,7 @@ function Signaler({ onSubmit, lang, coordFormat }) {
   const [photo, setPhoto] = useState(null);
   const [donneesCollecte, setDonneesCollecte] = useState({});
   const [sent, setSent] = useState(false);
-  const [gpsFix, setGpsFix] = useState(null);
+  const fileRef = useRef(null);
 
   // Taxonomie dynamique (défis/problèmes publiés par le super-admin). Tant que rien n'est
   // publié, `defisPublies` reste vide et le formulaire se comporte exactement comme avant
@@ -2662,6 +2340,14 @@ function Signaler({ onSubmit, lang, coordFormat }) {
   const problemesDuDefi = defiChoisi ? problemesPublies.filter(p => p.defi_id === defiChoisi.id) : [];
   const champsDynamiques = (problemeChoisi && problemeChoisi.champs_collecte) || [];
 
+  function handlePhoto(e) {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = async () => setPhoto(await compressImage(reader.result));
+    reader.readAsDataURL(f);
+  }
+
   function champManquant() {
     // Les champs de type "photo" ne sont pas rendus ici (la photo est déjà gérée par le
     // bouton photo général du formulaire) : ils ne doivent donc jamais bloquer l'envoi.
@@ -2674,15 +2360,10 @@ function Signaler({ onSubmit, lang, coordFormat }) {
       setSent(true);
       setTimeout(() => {
         setSent(false); setStep(1); setDefiChoisi(null); setCategorie(null); setProblemeChoisi(null);
-        setDescription(""); setPhoto(null); setUrgence("moyenne"); setDonneesCollecte({}); setGpsFix(null);
+        setDescription(""); setPhoto(null); setUrgence("moyenne"); setDonneesCollecte({});
       }, 1800);
     };
-    // Priorité au relevé GPS visible dans le formulaire (widget LocationPrecision), que
-    // l'utilisateur a pu vérifier avant l'envoi. On ne retente un relevé "à l'aveugle" que
-    // si ce widget n'a encore rien capté (ex. permission accordée tardivement).
-    if (gpsFix && gpsFix.lat != null && gpsFix.lng != null) {
-      finalize(gpsFix.lat, gpsFix.lng);
-    } else if (navigator.geolocation) {
+    if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => finalize(pos.coords.latitude, pos.coords.longitude),
         () => finalize(AFRICA_CENTER[0], AFRICA_CENTER[1]),
@@ -2789,7 +2470,17 @@ function Signaler({ onSubmit, lang, coordFormat }) {
             ))}
           </div>
           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--c-text)", marginBottom: 8 }}>{t(lang, "photo_label")}</div>
-          <PhotoCaptureButton photo={photo} onChange={setPhoto} label={t(lang, "ajouter_photo")} previewMaxHeight={160} />
+          <input ref={fileRef} type="file" accept="image/*" onChange={handlePhoto} style={{ display: "none" }} />
+          {photo ? (
+            <div style={{ position: "relative", marginBottom: 16 }}>
+              <img src={photo} alt={t(lang, "apercu_photo")} style={{ width: "100%", borderRadius: 12, maxHeight: 160, objectFit: "cover" }} />
+              <button onClick={() => setPhoto(null)} style={{ position: "absolute", top: 8, right: 8, background: "var(--c-text)bb", border: "none", borderRadius: "50%", width: 26, height: 26, color: "#fff", cursor: "pointer" }}><IconX size={14} /></button>
+            </div>
+          ) : (
+            <button onClick={() => fileRef.current.click()} style={{ width: "100%", border: "1.5px dashed var(--c-text-faint)", borderRadius: 12, padding: 18, background: "var(--c-surface-dashed)", color: "var(--c-text-secondary)", cursor: "pointer", marginBottom: 16, display: "flex", flexDirection: "column", alignItems: "center", gap: 6, fontSize: 12.5 }}>
+              <IconCamera size={20} /> {t(lang, "ajouter_photo")}
+            </button>
+          )}
           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--c-text)", marginBottom: 8 }}>{t(lang, "description_label")}</div>
           <textarea value={description} onChange={e => setDescription(e.target.value)} rows={3} placeholder={t(lang, "decrire_situation")}
             style={{ width: "100%", borderRadius: 12, border: "1px solid var(--c-border)", padding: 10, fontSize: 13, fontFamily: "Work Sans, sans-serif", resize: "none" }} />
@@ -2815,9 +2506,7 @@ function Signaler({ onSubmit, lang, coordFormat }) {
             </div>
           )}
 
-          <div style={{ marginTop: 12 }}>
-            <LocationPrecision coordFormat={coordFormat} onUpdate={setGpsFix} />
-          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 12, fontSize: 12, color: "var(--c-text-muted)" }}><IconMapPin size={14} /> {t(lang, "gps_auto")}</div>
         </div>
       )}
       <div style={{ display: "flex", gap: 10, marginTop: 22 }}>
@@ -2895,97 +2584,6 @@ function formatCap(deg) {
 function formatVitesse(ms) {
   if (ms == null || isNaN(ms)) return "—";
   return `${(ms * 3.6).toFixed(1)} km/h`;
-}
-
-// Widget de précision GPS réutilisable, à intégrer directement dans un formulaire
-// (Signaler, Mon Arbre, Biodiversité, Espace Organisation) pour que le citoyen VOIT ses
-// coordonnées et leur marge d'erreur avant d'envoyer, plutôt qu'un relevé unique pris en
-// silence au moment de l'envoi (avec un repli invisible vers un point par défaut en cas
-// d'échec, source d'erreurs de localisation). Suit la position en direct (watchPosition) le
-// temps que le formulaire reste ouvert, et remonte le dernier relevé fiable via onUpdate
-// pour que le composant parent l'utilise à l'envoi.
-function LocationPrecision({ coordFormat, onUpdate, compact = false }) {
-  const [gps, setGps] = useState(null);
-  const [error, setError] = useState(null);
-  const watchIdRef = useRef(null);
-  const onUpdateRef = useRef(onUpdate);
-  onUpdateRef.current = onUpdate;
-
-  function start() {
-    if (!navigator.geolocation) { setError("unsupported"); return; }
-    setError(null);
-    watchIdRef.current = navigator.geolocation.watchPosition(
-      (pos) => {
-        const data = {
-          lat: pos.coords.latitude, lng: pos.coords.longitude,
-          accuracy: pos.coords.accuracy, altitude: pos.coords.altitude,
-          speed: pos.coords.speed, heading: pos.coords.heading,
-          timestamp: pos.timestamp,
-        };
-        setGps(data);
-        if (onUpdateRef.current) onUpdateRef.current(data);
-      },
-      (err) => setError(err && err.code === 1 ? "permission" : "unavailable"),
-      { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 }
-    );
-  }
-
-  useEffect(() => {
-    start();
-    return () => {
-      if (watchIdRef.current != null && navigator.geolocation) { navigator.geolocation.clearWatch(watchIdRef.current); watchIdRef.current = null; }
-    };
-  }, []);
-
-  function refresh() {
-    if (watchIdRef.current != null && navigator.geolocation) { navigator.geolocation.clearWatch(watchIdRef.current); watchIdRef.current = null; }
-    setGps(null);
-    start();
-  }
-
-  const qualite = gps ? gpsQualite(gps.accuracy) : null;
-  const imprecise = !!(gps && gps.accuracy != null && gps.accuracy > 50);
-
-  return (
-    <div style={{ background: "var(--c-surface-soft)", borderRadius: compact ? 10 : 12, padding: compact ? 9 : 11, marginBottom: compact ? 8 : 10, fontSize: 11.5, border: imprecise ? "1px solid #B5451B55" : "1px solid var(--c-border-soft)" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--c-text)", fontWeight: 600 }}>
-          <IconTarget size={13} color="var(--c-text-muted)" /> Position GPS
-        </div>
-        <button type="button" onClick={refresh} title="Actualiser la position" aria-label="Actualiser la position" style={{ background: "none", border: "none", cursor: "pointer", padding: 3, display: "flex", color: "var(--c-text-muted)" }}>
-          <IconRotateCcw size={13} />
-        </button>
-      </div>
-      {error ? (
-        <div style={{ color: "#B5451B", marginTop: 5, lineHeight: 1.5 }}>
-          {error === "permission"
-            ? "Localisation refusée. Autorise l'accès à la position dans les réglages du navigateur pour des coordonnées fiables."
-            : error === "unsupported"
-              ? "La géolocalisation n'est pas disponible sur cet appareil."
-              : "Signal GPS introuvable pour le moment — réessaie dans quelques secondes."}
-        </div>
-      ) : !gps ? (
-        <div style={{ color: "var(--c-text-muted)", marginTop: 5, display: "flex", alignItems: "center", gap: 6 }}>
-          <IconClock size={12} /> Recherche du signal GPS…
-        </div>
-      ) : (
-        <React.Fragment>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 5 }}>
-            <span style={{ width: 8, height: 8, borderRadius: "50%", background: qualite.couleur, display: "inline-block", flexShrink: 0 }} />
-            <span style={{ color: "var(--c-text-secondary)" }}>Précision {qualite.label.toLowerCase()} — ±{Math.round(gps.accuracy)} m</span>
-          </div>
-          <div style={{ marginTop: 4, fontFamily: "IBM Plex Mono, monospace", color: "var(--c-text)", fontSize: 11 }}>
-            {formatCoordonnees(gps.lat, gps.lng, coordFormat)}
-          </div>
-          {imprecise && (
-            <div style={{ marginTop: 5, color: "#B5451B", lineHeight: 1.5 }}>
-              Précision faible : sors à l'air libre ou attends quelques secondes avant d'envoyer, pour éviter une localisation erronée.
-            </div>
-          )}
-        </React.Fragment>
-      )}
-    </div>
-  );
 }
 
 // ===== Cache de tuiles hors-ligne (IndexedDB) =====
@@ -3711,11 +3309,11 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
         if (!passeFiltrePeriode(a.planted_at)) return;
         counts.arbres++;
         const icon = L.divIcon({ html: markerHtml("var(--c-accent)", "tree"), className: "", iconSize: [30, 30], iconAnchor: [15, 30] });
-        const photoHtml = mediaHtml(a.photo_url, 110);
+        const photoHtml = a.photo_url ? `<img src="${a.photo_url}" style="width:100%;max-height:110px;object-fit:cover;border-radius:8px;margin-top:6px" />` : "";
         const pendingHtml = !a.valide ? `<div style="font-size:11px;color:#B5451B;margin-top:4px">⏳ ${t(lang, "en_attente_validation")}</div>` : "";
         L.marker([a.lat, a.lng], { icon, opacity: a.valide ? 1 : 0.6 }).addTo(layerRef.current)
           .on("click", () => setSelected({ type: "arbre", data: a }))
-          .bindPopup(`<b>${escapeHtml(a.nom)}</b><br/>${t(lang, "plante_le")}${a.date}${photoHtml}${pendingHtml}`);
+          .bindPopup(`<b>${a.nom}</b><br/>${t(lang, "plante_le")}${a.date}${photoHtml}${pendingHtml}`);
       });
     }
 
@@ -3731,11 +3329,11 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
         const color = u ? u.color : "#B5451B";
         const icon = L.divIcon({ html: markerHtml(color, "pin"), className: "", iconSize: [30, 30], iconAnchor: [15, 30] });
         const cat = categorieMeta(s.categorie);
-        const photoHtml = mediaHtml(s.photo_url, 110);
+        const photoHtml = s.photo_url ? `<img src="${s.photo_url}" style="width:100%;max-height:110px;object-fit:cover;border-radius:8px;margin-top:6px" />` : "";
         const pendingHtml = !s.valide ? `<div style="font-size:11px;color:#B5451B;margin-top:4px">⏳ ${t(lang, "en_attente_validation")}</div>` : "";
         L.marker([s.lat, s.lng], { icon, opacity: s.valide ? 1 : 0.6 }).addTo(layerRef.current)
           .on("click", () => setSelected({ type: "signalement", data: s }))
-          .bindPopup(`<b>${escapeHtml(categorieLabel(lang, cat.id))}</b><br/>${s.date}${photoHtml}${pendingHtml}`);
+          .bindPopup(`<b>${categorieLabel(lang, cat.id)}</b><br/>${s.date}${photoHtml}${pendingHtml}`);
       });
     }
 
@@ -3745,10 +3343,10 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
         if (!passeFiltrePeriode(o.created_at)) return;
         counts.biodiversite++;
         const icon = L.divIcon({ html: markerHtml("var(--c-sky)", "leaf"), className: "", iconSize: [30, 30], iconAnchor: [15, 30] });
-        const photoHtml = mediaHtml(o.photo_url, 110);
+        const photoHtml = o.photo_url ? `<img src="${o.photo_url}" style="width:100%;max-height:110px;object-fit:cover;border-radius:8px;margin-top:6px" />` : "";
         L.marker([o.lat, o.lng], { icon }).addTo(layerRef.current)
           .on("click", () => setSelected({ type: "observation", data: o }))
-          .bindPopup(`<b>${o.espece ? escapeHtml(o.espece) : t(lang, "observation_generique")}</b><br/>${new Date(o.created_at).toLocaleDateString("fr-FR")}${photoHtml}`);
+          .bindPopup(`<b>${o.espece || t(lang, "observation_generique")}</b><br/>${new Date(o.created_at).toLocaleDateString("fr-FR")}${photoHtml}`);
       });
     }
 
@@ -3762,7 +3360,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
     if (!showZones) return;
     zonesLocales.forEach(z => {
       const icon = L.divIcon({ html: markerHtml("var(--c-warning)", "pin"), className: "", iconSize: [26, 26], iconAnchor: [13, 26] });
-      L.marker([z.lat, z.lng], { icon }).addTo(zonesLayerRef.current).bindPopup(`<b>${escapeHtml(z.nom)}</b><br/>${t(lang, "zone_enregistree_localement")}`);
+      L.marker([z.lat, z.lng], { icon }).addTo(zonesLayerRef.current).bindPopup(`<b>${z.nom}</b><br/>${t(lang, "zone_enregistree_localement")}`);
     });
   }, [zonesLocales, showZones]);
 
@@ -3801,7 +3399,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
     if (s.type === "signalement") {
       return (
         <>
-          <MediaThumb src={s.data.photo_url} style={{ width: "100%", maxHeight: 180, objectFit: "cover", borderRadius: 10, marginBottom: 8 }} />
+          {s.data.photo_url && <img src={s.data.photo_url} style={{ width: "100%", maxHeight: 180, objectFit: "cover", borderRadius: 10, marginBottom: 8 }} />}
           <div style={{ fontWeight: 600, fontSize: 14 }}>{categorieLabel(lang, s.data.categorie)}</div>
           <div style={{ fontSize: 12, color: "var(--c-text-muted)", marginTop: 3 }}>{s.data.date}{s.data.statut ? ` · ${s.data.statut}` : ""}</div>
           <div style={{ fontSize: 13, color: "var(--c-text-secondary)", marginTop: 6 }}>{s.data.description || t(lang, "aucune_description")}</div>
@@ -3811,7 +3409,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
     if (s.type === "observation") {
       return (
         <>
-          <MediaThumb src={s.data.photo_url} style={{ width: "100%", maxHeight: 180, objectFit: "cover", borderRadius: 10, marginBottom: 8 }} />
+          {s.data.photo_url && <img src={s.data.photo_url} style={{ width: "100%", maxHeight: 180, objectFit: "cover", borderRadius: 10, marginBottom: 8 }} />}
           <div style={{ fontWeight: 600, fontSize: 14 }}>{s.data.espece || t(lang, "observation_biodiversite")}</div>
           <div style={{ fontSize: 12, color: "var(--c-text-muted)", marginTop: 3 }}>{new Date(s.data.created_at).toLocaleDateString("fr-FR")}</div>
           <div style={{ fontSize: 13, color: "var(--c-text-secondary)", marginTop: 6 }}>{s.data.description || t(lang, "aucune_description")}</div>
@@ -3820,7 +3418,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
     }
     return (
       <>
-        <MediaThumb src={s.data.photo_url} style={{ width: "100%", maxHeight: 180, objectFit: "cover", borderRadius: 10, marginBottom: 8 }} />
+        {s.data.photo_url && <img src={s.data.photo_url} style={{ width: "100%", maxHeight: 180, objectFit: "cover", borderRadius: 10, marginBottom: 8 }} />}
         <div style={{ fontWeight: 600, fontSize: 14 }}>{s.data.nom}</div>
         <div style={{ fontSize: 12, color: "var(--c-text-muted)", marginTop: 3 }}>{t(lang, "plante_le")}{s.data.date}</div>
       </>
@@ -4299,17 +3897,23 @@ function MonArbre({ arbres, suivis, onAdd, onAddSuivi, lang, coordFormat }) {
   const [nom, setNom] = useState("");
   const [photo, setPhoto] = useState(null);
   const [suiviOuvert, setSuiviOuvert] = useState(null);
-  const [gpsFix, setGpsFix] = useState(null);
+  const fileRef = useRef(null);
+
+  function handlePhoto(e) {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = async () => setPhoto(await compressImage(reader.result));
+    reader.readAsDataURL(f);
+  }
 
   function submit() {
     if (!nom.trim()) return;
     const finalize = (lat, lng) => {
       onAdd({ nom, photo, lat, lng });
-      setNom(""); setPhoto(null); setShowForm(false); setGpsFix(null);
+      setNom(""); setPhoto(null); setShowForm(false);
     };
-    if (gpsFix && gpsFix.lat != null && gpsFix.lng != null) {
-      finalize(gpsFix.lat, gpsFix.lng);
-    } else if (navigator.geolocation) {
+    if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => finalize(pos.coords.latitude, pos.coords.longitude),
         () => finalize(AFRICA_CENTER[0], AFRICA_CENTER[1]),
@@ -4343,9 +3947,15 @@ function MonArbre({ arbres, suivis, onAdd, onAddSuivi, lang, coordFormat }) {
       )}
       {showForm && (
         <div style={{ background: "var(--c-surface)", borderRadius: 14, padding: 14, border: "1px solid var(--c-border)", marginBottom: 16 }}>
-          <PhotoCaptureButton photo={photo} onChange={setPhoto} label="Photo de l'arbre" previewMaxHeight={130} />
+          <input ref={fileRef} type="file" accept="image/*" onChange={handlePhoto} style={{ display: "none" }} />
+          {photo ? (
+            <img src={photo} style={{ width: "100%", borderRadius: 10, maxHeight: 130, objectFit: "cover", marginBottom: 10 }} />
+          ) : (
+            <button onClick={() => fileRef.current.click()} style={{ width: "100%", border: "1.5px dashed var(--c-text-faint)", borderRadius: 10, padding: 14, background: "var(--c-surface-dashed)", color: "var(--c-text-secondary)", cursor: "pointer", marginBottom: 10, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: 12 }}>
+              <IconCamera size={16} /> Photo de l'arbre
+            </button>
+          )}
           <input value={nom} onChange={e => setNom(e.target.value)} placeholder="Espèce (ex : Manguier, Teck...)" style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10, boxSizing: "border-box" }} />
-          <LocationPrecision coordFormat={coordFormat} onUpdate={setGpsFix} compact />
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={() => setShowForm(false)} style={{ flex: 1, padding: "10px 0", borderRadius: 10, border: "1px solid var(--c-border)", background: "var(--c-surface)", cursor: "pointer", fontSize: 13 }}>Annuler</button>
             <button onClick={submit} style={{ flex: 1, padding: "10px 0", borderRadius: 10, border: "none", background: "var(--c-accent)", color: "#fff", fontWeight: 600, cursor: "pointer", fontSize: 13 }}>Enregistrer</button>
@@ -4369,7 +3979,7 @@ function MonArbre({ arbres, suivis, onAdd, onAddSuivi, lang, coordFormat }) {
             <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
               <div style={{ position: "relative", width: 56, height: 56, flexShrink: 0 }}>
                 {a.photo_url ? (
-                  <MediaThumbSmall src={a.photo_url} style={{ width: 56, height: 56, borderRadius: "50%", objectFit: "cover", border: "3px solid var(--c-bg)" }} />
+                  <img src={a.photo_url} style={{ width: 56, height: 56, borderRadius: "50%", objectFit: "cover", border: "3px solid var(--c-bg)" }} />
                 ) : (
                   <>
                     <TreeRing pct={growth(a)} />
@@ -4413,10 +4023,26 @@ function SuiviForm({ onSave, onCancel }) {
   const [etat, setEtat] = useState("vivant");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
+  const fileRef = useRef(null);
+
+  function handlePhoto(e) {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = async () => setPhoto(await compressImage(reader.result));
+    reader.readAsDataURL(f);
+  }
 
   return (
     <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--c-border-soft)" }}>
-      <PhotoCaptureButton photo={photo} onChange={setPhoto} label="Photo de suivi" previewMaxHeight={120} compact />
+      <input ref={fileRef} type="file" accept="image/*" onChange={handlePhoto} style={{ display: "none" }} />
+      {photo ? (
+        <img src={photo} style={{ width: "100%", borderRadius: 10, maxHeight: 120, objectFit: "cover", marginBottom: 8 }} />
+      ) : (
+        <button onClick={() => fileRef.current.click()} style={{ width: "100%", border: "1.5px dashed var(--c-text-faint)", borderRadius: 10, padding: 12, background: "var(--c-surface-dashed)", color: "var(--c-text-secondary)", cursor: "pointer", marginBottom: 8, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: 12 }}>
+          <IconCamera size={15} /> Photo de suivi
+        </button>
+      )}
       <select value={etat} onChange={e => setEtat(e.target.value)} style={{ width: "100%", padding: 8, borderRadius: 8, border: "1px solid var(--c-border)", fontSize: 12.5, marginBottom: 8, boxSizing: "border-box" }}>
         {Object.entries(ETAT_SUIVI).map(([id, v]) => <option key={id} value={id}>{v.label}</option>)}
       </select>
@@ -4948,25 +4574,31 @@ function BenevoleAccesBloque({ statut }) {
   );
 }
 
-function Biodiversite({ observations, onAdd, onBack, lang, coordFormat }) {
+function Biodiversite({ observations, onAdd, onBack, lang }) {
   const [showForm, setShowForm] = useState(false);
   const [espece, setEspece] = useState("");
   const [description, setDescription] = useState("");
   const [photo, setPhoto] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [gpsFix, setGpsFix] = useState(null);
+  const fileRef = useRef(null);
+
+  function handlePhoto(e) {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = async () => setPhoto(await compressImage(reader.result));
+    reader.readAsDataURL(f);
+  }
 
   function submit() {
     if (!espece.trim()) return;
     setBusy(true);
     const finalize = (lat, lng) => {
       onAdd({ espece, description, photo, lat, lng }).finally(() => {
-        setBusy(false); setEspece(""); setDescription(""); setPhoto(null); setShowForm(false); setGpsFix(null);
+        setBusy(false); setEspece(""); setDescription(""); setPhoto(null); setShowForm(false);
       });
     };
-    if (gpsFix && gpsFix.lat != null && gpsFix.lng != null) {
-      finalize(gpsFix.lat, gpsFix.lng);
-    } else if (navigator.geolocation) {
+    if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => finalize(pos.coords.latitude, pos.coords.longitude),
         () => finalize(AFRICA_CENTER[0], AFRICA_CENTER[1]),
@@ -4986,12 +4618,18 @@ function Biodiversite({ observations, onAdd, onBack, lang, coordFormat }) {
         </button>
       ) : (
         <div style={{ background: "var(--c-surface)", borderRadius: 14, padding: 14, border: "1px solid var(--c-border)", marginBottom: 16 }}>
-          <PhotoCaptureButton photo={photo} onChange={setPhoto} label={t(lang, "photo_espece")} previewMaxHeight={130} />
+          <input ref={fileRef} type="file" accept="image/*" onChange={handlePhoto} style={{ display: "none" }} />
+          {photo ? (
+            <img src={photo} style={{ width: "100%", borderRadius: 10, maxHeight: 130, objectFit: "cover", marginBottom: 10 }} />
+          ) : (
+            <button onClick={() => fileRef.current.click()} style={{ width: "100%", border: "1.5px dashed var(--c-text-faint)", borderRadius: 10, padding: 14, background: "var(--c-surface-dashed)", color: "var(--c-text-secondary)", cursor: "pointer", marginBottom: 10, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: 12 }}>
+              <IconCamera size={16} /> {t(lang, "photo_espece")}
+            </button>
+          )}
           <input value={espece} onChange={e => setEspece(e.target.value)} placeholder={t(lang, "espece_placeholder")}
             style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
           <textarea value={description} onChange={e => setDescription(e.target.value)} rows={2} placeholder={t(lang, "remarques_placeholder")}
             style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10, boxSizing: "border-box", resize: "none", fontFamily: "Work Sans, sans-serif" }} />
-          <LocationPrecision coordFormat={coordFormat} onUpdate={setGpsFix} compact />
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={() => setShowForm(false)} style={{ flex: 1, padding: "10px 0", borderRadius: 10, border: "1px solid var(--c-border)", background: "var(--c-surface)", cursor: "pointer", fontSize: 13 }}>{t(lang, "annuler")}</button>
             <button onClick={submit} disabled={busy} style={{ flex: 1, padding: "10px 0", borderRadius: 10, border: "none", background: "var(--c-accent)", color: "#fff", fontWeight: 600, cursor: "pointer", fontSize: 13 }}>{busy ? t(lang, "envoi_en_cours") : t(lang, "enregistrer")}</button>
@@ -5003,7 +4641,7 @@ function Biodiversite({ observations, onAdd, onBack, lang, coordFormat }) {
         {observations.length === 0 && <div style={{ color: "var(--c-text-muted)", fontSize: 13, textAlign: "center", padding: 20 }}>{t(lang, "aucune_observation_partagee")}</div>}
         {[...observations].reverse().map(o => (
           <div key={o.id} style={{ background: "var(--c-surface)", borderRadius: 14, padding: 12, border: "1px solid var(--c-border)" }}>
-            <MediaThumb src={o.photo_url} style={{ width: "100%", maxHeight: 150, objectFit: "cover", borderRadius: 10, marginBottom: 8 }} />
+            {o.photo_url && <img src={o.photo_url} style={{ width: "100%", maxHeight: 150, objectFit: "cover", borderRadius: 10, marginBottom: 8 }} />}
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }}>
               <IconPaw size={14} color="var(--c-accent)" />
               <div style={{ fontWeight: 600, fontSize: 13 }}>{o.espece}</div>
@@ -5075,7 +4713,7 @@ function buildPaceStatsReplies(signalements, arbres, observations, actualites) {
   };
 }
 
-function EspaceOrganisation({ organisationEmail, onBack, coordFormat }) {
+function EspaceOrganisation({ organisationEmail, onBack }) {
   const [org, setOrg] = useState(null);
   const [signalements, setSignalements] = useState(null);
   const [defisNoms, setDefisNoms] = useState({});
@@ -5094,7 +4732,7 @@ function EspaceOrganisation({ organisationEmail, onBack, coordFormat }) {
   const [photoArbre, setPhotoArbre] = useState(null);
   const [busyArbre, setBusyArbre] = useState(false);
   const [erreurArbre, setErreurArbre] = useState("");
-  const [gpsFixArbre, setGpsFixArbre] = useState(null);
+  const fileArbreRef = useRef(null);
   // Projets & activités de l'organisation
   const [mesProjets, setMesProjets] = useState(null);
   const [showFormProjet, setShowFormProjet] = useState(false);
@@ -5356,6 +4994,14 @@ function EspaceOrganisation({ organisationEmail, onBack, coordFormat }) {
     setMessageActu("Actualité publiée.");
   }
 
+  function handlePhotoArbre(e) {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = async () => setPhotoArbre(await compressImage(reader.result));
+    reader.readAsDataURL(f);
+  }
+
   async function toggleSuppressionArbreOrg(a) {
     if (a.is_deleted) {
       const { error } = await supabase.from("arbres").update({ is_deleted: false, deleted_at: null, deleted_by: null }).eq("id", a.id);
@@ -5380,7 +5026,7 @@ function EspaceOrganisation({ organisationEmail, onBack, coordFormat }) {
           valide: false, publie: false, is_deleted: false,
         });
         if (error) throw error;
-        setNomArbre(""); setPhotoArbre(null); setShowFormArbre(false); setGpsFixArbre(null);
+        setNomArbre(""); setPhotoArbre(null); setShowFormArbre(false);
         chargerArbres(org);
       } catch (err) {
         setErreurArbre("Échec de l'enregistrement : " + (err.message || "erreur inconnue"));
@@ -5388,9 +5034,7 @@ function EspaceOrganisation({ organisationEmail, onBack, coordFormat }) {
         setBusyArbre(false);
       }
     };
-    if (gpsFixArbre && gpsFixArbre.lat != null && gpsFixArbre.lng != null) {
-      finalize(gpsFixArbre.lat, gpsFixArbre.lng);
-    } else if (navigator.geolocation) {
+    if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => finalize(pos.coords.latitude, pos.coords.longitude),
         () => finalize(AFRICA_CENTER[0], AFRICA_CENTER[1]),
@@ -5441,18 +5085,25 @@ function EspaceOrganisation({ organisationEmail, onBack, coordFormat }) {
 
       {showFormArbre && (
         <div style={{ background: "var(--c-surface)", borderRadius: 14, padding: 14, border: "1px solid var(--c-border)", marginBottom: 14 }}>
-          <PhotoCaptureButton photo={photoArbre} onChange={setPhotoArbre} label="Ajouter une photo (optionnel)" previewMaxHeight={130} />
+          <input ref={fileArbreRef} type="file" accept="image/*" onChange={handlePhotoArbre} style={{ display: "none" }} />
+          {photoArbre ? (
+            <img src={photoArbre} style={{ width: "100%", borderRadius: 10, maxHeight: 130, objectFit: "cover", marginBottom: 10 }} />
+          ) : (
+            <button onClick={() => fileArbreRef.current && fileArbreRef.current.click()} style={{ width: "100%", padding: "10px 0", borderRadius: 10, border: "1px dashed var(--c-border)", background: "var(--c-surface-soft)", color: "var(--c-text-muted)", fontSize: 12.5, cursor: "pointer", marginBottom: 10 }}>
+              Ajouter une photo (optionnel)
+            </button>
+          )}
           <input value={nomArbre} onChange={e => setNomArbre(e.target.value)} placeholder="Essence / nom de l'arbre (ex : Manguier, Teck…)"
             style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10, boxSizing: "border-box" }} />
           {erreurArbre && <div role="alert" style={{ fontSize: 12, color: "#B5451B", marginBottom: 10 }}>{erreurArbre}</div>}
-          <LocationPrecision coordFormat={coordFormat} onUpdate={setGpsFixArbre} compact />
+          <div style={{ fontSize: 11, color: "var(--c-text-muted)", marginBottom: 10 }}>La position GPS de l'appareil sera utilisée pour géolocaliser la plantation.</div>
           <button onClick={planterArbreOrganisation} disabled={busyArbre || !nomArbre.trim()} style={{
             padding: "9px 14px", borderRadius: 10, border: "none",
             background: (!nomArbre.trim()) ? "var(--c-text-faint)" : "var(--c-accent-dark)", color: "#fff", fontWeight: 600, fontSize: 12.5,
             cursor: (!nomArbre.trim()) ? "default" : "pointer", marginRight: 8 }}>
             {busyArbre ? "…" : "Enregistrer"}
           </button>
-          <button onClick={() => { setShowFormArbre(false); setErreurArbre(""); setNomArbre(""); setPhotoArbre(null); setGpsFixArbre(null); }} style={{ padding: "9px 14px", borderRadius: 10, border: "1px solid var(--c-border)", background: "var(--c-surface)", color: "var(--c-text-secondary)", fontWeight: 600, fontSize: 12.5, cursor: "pointer" }}>
+          <button onClick={() => { setShowFormArbre(false); setErreurArbre(""); setNomArbre(""); setPhotoArbre(null); }} style={{ padding: "9px 14px", borderRadius: 10, border: "1px solid var(--c-border)", background: "var(--c-surface)", color: "var(--c-text-secondary)", fontWeight: 600, fontSize: 12.5, cursor: "pointer" }}>
             Annuler
           </button>
         </div>
@@ -5470,7 +5121,7 @@ function EspaceOrganisation({ organisationEmail, onBack, coordFormat }) {
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {mesArbres.map(a => (
               <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "var(--c-surface)", borderRadius: 10, padding: "8px 10px", border: "1px solid var(--c-border)", opacity: a.is_deleted ? 0.55 : 1 }}>
-                {a.photo_url ? <MediaThumbSmall src={a.photo_url} style={{ width: 36, height: 36, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} /> : <div style={{ width: 36, height: 36, borderRadius: 8, background: "var(--c-surface-soft)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><IconTree size={16} color="var(--c-text-muted)" /></div>}
+                {a.photo_url ? <img src={a.photo_url} style={{ width: 36, height: 36, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} /> : <div style={{ width: 36, height: 36, borderRadius: 8, background: "var(--c-surface-soft)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><IconTree size={16} color="var(--c-text-muted)" /></div>}
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 12.5, fontWeight: 600 }}>{a.nom}</div>
                   <div style={{ fontSize: 10.5, color: "var(--c-text-muted)" }}>{new Date(a.created_at).toLocaleDateString("fr-FR")}</div>
@@ -5995,6 +5646,15 @@ function GroupesTerrain({ onBack, estBenevoleValide }) {
   const [assigneMission, setAssigneMission] = useState("");
   const [busyMission, setBusyMission] = useState(false);
 
+  // Demande de publication/certification du groupe
+  const [demandePub, setDemandePub] = useState(null); // dernière demande pour ce groupe, ou undefined si aucune
+  const [showFormPub, setShowFormPub] = useState(false);
+  const [justificationPub, setJustificationPub] = useState("");
+  const [itemPub, setItemPub] = useState("");
+  const [itemsPub, setItemsPub] = useState([]);
+  const [busyPub, setBusyPub] = useState(false);
+  const [erreurPub, setErreurPub] = useState("");
+
   async function chargerGroupes() {
     const { data: adhesions } = await supabase.from("gt_membres").select("groupe_id").eq("device_id", DEVICE_ID).eq("statut", "actif");
     const ids = (adhesions || []).map(a => a.groupe_id);
@@ -6006,15 +5666,40 @@ function GroupesTerrain({ onBack, estBenevoleValide }) {
 
   async function selectionnerGroupe(id) {
     setGroupeSelectionne(id);
-    setMembres(null); setMissions(null); setAuditLog(null);
-    const [{ data: m }, { data: mi }, { data: log }] = await Promise.all([
+    setMembres(null); setMissions(null); setDemandePub(undefined); setAuditLog(null);
+    const [{ data: m }, { data: mi }, { data: pub }, { data: log }] = await Promise.all([
       supabase.from("gt_membres").select("*").eq("groupe_id", id).eq("statut", "actif").order("joined_at", { ascending: true }),
       supabase.from("gt_missions").select("*").eq("groupe_id", id).order("created_at", { ascending: false }),
+      supabase.from("gt_publication_demandes").select("*").eq("groupe_id", id).order("created_at", { ascending: false }).limit(1).maybeSingle(),
       supabase.from("gt_audit_log").select("*").eq("groupe_id", id).order("created_at", { ascending: false }).limit(20),
     ]);
     setMembres(m || []);
     setMissions(mi || []);
+    setDemandePub(pub || null);
     setAuditLog(log || []);
+  }
+
+  function ajouterItemPub() {
+    if (!itemPub.trim()) return;
+    setItemsPub(prev => [...prev, itemPub.trim()]);
+    setItemPub("");
+  }
+
+  function soumettrePublication() {
+    setErreurPub("");
+    if (!justificationPub.trim()) { setErreurPub("Explique pourquoi ce groupe mérite d'être mis en avant."); return; }
+    setBusyPub(true);
+    supabase.from("gt_publication_demandes").insert({
+      groupe_id: groupeSelectionne, demande_par: DEVICE_ID, justification: justificationPub.trim(), items: itemsPub,
+    }).then(async ({ error }) => {
+      if (error) { setBusyPub(false); setErreurPub("Échec : " + (error.message || "erreur inconnue")); return; }
+      await supabase.from("gt_groupes").update({ publication_statut: "demandee" }).eq("id", groupeSelectionne);
+      logGroupeAudit(groupeSelectionne, "certification_demandee", "gt_publication_demandes", null, justificationPub.trim().slice(0, 140));
+      setBusyPub(false);
+      setJustificationPub(""); setItemsPub([]); setShowFormPub(false);
+      await chargerGroupes();
+      selectionnerGroupe(groupeSelectionne);
+    });
   }
 
   function creerGroupe() {
@@ -6179,6 +5864,58 @@ function GroupesTerrain({ onBack, estBenevoleValide }) {
               </div>
             ))}
           </div>
+        )}
+
+        <div style={{ fontFamily: "Fraunces, serif", fontSize: 14, fontWeight: 600, color: "var(--c-accent-dark)", margin: "18px 0 8px" }}>Reconnaissance officielle</div>
+        {groupeInfo.publication_statut === "approuvee" ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--c-surface)", border: "1px solid var(--c-accent)", borderRadius: 12, padding: 12 }}>
+            <IconShield size={16} color="var(--c-accent)" />
+            <div style={{ fontSize: 12, color: "var(--c-text-secondary)" }}>Ce groupe a été <strong>certifié</strong> par l'équipe PACE Connect.</div>
+          </div>
+        ) : groupeInfo.publication_statut === "demandee" ? (
+          <div style={{ fontSize: 12, color: "var(--c-text-secondary)", background: "var(--c-surface-soft)", border: "1px solid var(--c-border)", borderRadius: 12, padding: 12 }}>
+            Demande de certification envoyée, en attente de validation par un admin.
+          </div>
+        ) : (
+          <>
+            {demandePub && (demandePub.statut === "refusee" || demandePub.statut === "corrections_demandees") && (
+              <div style={{ fontSize: 12, color: "#B5451B", background: "var(--c-surface-soft)", border: "1px solid var(--c-border)", borderRadius: 12, padding: 12, marginBottom: 8 }}>
+                {demandePub.statut === "corrections_demandees" ? "Corrections demandées" : "Demande précédente refusée"}{demandePub.decision_motif ? ` : ${demandePub.decision_motif}` : "."} Tu peux soumettre une nouvelle demande ci-dessous.
+              </div>
+            )}
+            {!showFormPub ? (
+              <button onClick={() => setShowFormPub(true)} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, width: "100%", padding: "9px 14px", borderRadius: 10, border: "1px dashed var(--c-border)", background: "none", color: "var(--c-text-secondary)", fontWeight: 600, fontSize: 12.5, cursor: "pointer" }}>
+                <IconShield size={14} /> Demander la certification du groupe
+              </button>
+            ) : (
+              <div style={{ background: "var(--c-surface)", borderRadius: 12, padding: 12, border: "1px solid var(--c-border)" }}>
+                <div style={{ fontSize: 11.5, color: "var(--c-text-muted)", marginBottom: 8 }}>
+                  Explique ce que le groupe a accompli et ajoute des preuves concrètes (missions terminées, résultats chiffrés...).
+                </div>
+                <textarea value={justificationPub} onChange={e => setJustificationPub(e.target.value)} rows={3} placeholder="Justification"
+                  style={{ width: "100%", padding: 8, borderRadius: 8, border: "1px solid var(--c-border)", fontSize: 12.5, marginBottom: 8, boxSizing: "border-box", fontFamily: "Work Sans, sans-serif", resize: "none" }} />
+                <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+                  <input value={itemPub} onChange={e => setItemPub(e.target.value)} onKeyDown={e => e.key === "Enter" && (e.preventDefault(), ajouterItemPub())} placeholder="Ex : 40 arbres plantés au parc X"
+                    style={{ flex: 1, padding: 8, borderRadius: 8, border: "1px solid var(--c-border)", fontSize: 12, boxSizing: "border-box" }} />
+                  <button onClick={ajouterItemPub} style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid var(--c-border)", background: "var(--c-bg)", fontSize: 11.5, cursor: "pointer" }}>Ajouter</button>
+                </div>
+                {itemsPub.length > 0 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+                    {itemsPub.map((it, i) => (
+                      <span key={i} style={{ fontSize: 10.5, background: "var(--c-surface-soft)", borderRadius: 999, padding: "4px 8px" }}>
+                        {it} <span onClick={() => setItemsPub(prev => prev.filter((_, idx) => idx !== i))} style={{ cursor: "pointer", color: "var(--c-text-muted)" }}>✕</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {erreurPub && <div role="alert" style={{ fontSize: 12, color: "#B5451B", marginBottom: 8 }}>{erreurPub}</div>}
+                <button onClick={soumettrePublication} disabled={busyPub || !justificationPub.trim()} style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: !justificationPub.trim() ? "var(--c-text-faint)" : "var(--c-accent-dark)", color: "#fff", fontWeight: 600, fontSize: 12, cursor: "pointer", marginRight: 6 }}>
+                  {busyPub ? "…" : "Envoyer la demande"}
+                </button>
+                <button onClick={() => { setShowFormPub(false); setErreurPub(""); }} style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid var(--c-border)", background: "var(--c-surface)", fontSize: 12, cursor: "pointer" }}>Annuler</button>
+              </div>
+            )}
+          </>
         )}
 
         <div style={{ fontFamily: "Fraunces, serif", fontSize: 14, fontWeight: 600, color: "var(--c-accent-dark)", margin: "18px 0 8px" }}>Journal d'activité</div>
@@ -6560,9 +6297,9 @@ const AUDIT_LABELS = {
   mission_a_faire: "Mission repassée à faire",
   mission_en_cours: "Mission démarrée",
   mission_termine: "Mission terminée",
-  reconnaissance_demandee: "Reconnaissance demandée",
-  reconnaissance_approuvee: "Reconnaissance approuvée",
-  reconnaissance_refusee: "Reconnaissance refusée",
+  certification_demandee: "Certification demandée",
+  certification_approuvee: "Certification approuvée",
+  certification_refusee: "Certification refusée",
   affiliation_confirmee: "Affiliation confirmée par l'organisation",
   affiliation_refusee: "Demande d'affiliation refusée par l'organisation",
   affiliation_retiree: "Affiliation retirée par l'organisation",
@@ -7092,7 +6829,7 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
       </div>
 
       <div style={{ display: "flex", gap: 6, marginBottom: 18, overflowX: "auto" }}>
-        {[["signalements", "Signalements", IconAlert], ["arbres", "Arbres", IconTree], ["actualites", "Actualités", IconNewspaper], ["evenements", "Événements", IconCalendar], ["benevoles", "Bénévoles", IconUsers], ["organisations", "Organisations", IconShield], ["publications", "Vérification", IconCheck], ["historique", "Historique", IconClock], ["securite", "Sécurité", IconShield], ["contenu_env", "Taxonomie", IconLayers], ["rapports", "Rapports", IconDownload], ["suppressions", "Suppressions", IconUserCircle]].map(([id, label, Ic]) => (
+        {[["signalements", "Signalements", IconAlert], ["arbres", "Arbres", IconTree], ["actualites", "Actualités", IconNewspaper], ["evenements", "Événements", IconCalendar], ["benevoles", "Bénévoles", IconUsers], ["organisations", "Organisations", IconShield], ["publications", "Publications", IconShield], ["historique", "Historique", IconClock], ["securite", "Sécurité", IconShield], ["contenu_env", "Taxonomie", IconLayers], ["rapports", "Rapports", IconDownload], ["suppressions", "Suppressions", IconUserCircle]].map(([id, label, Ic]) => (
           <button key={id} onClick={() => setPanel(id)} style={{
             display: "flex", alignItems: "center", gap: 5, padding: "7px 12px", borderRadius: 20, fontSize: 11.5, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap",
             border: panel === id ? "1px solid var(--c-accent-dark)" : "1px solid var(--c-border)",
@@ -7127,7 +6864,7 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
               const pInfo = PRIORITE_INFO[priorite];
               return (
                 <div key={s.id} style={{ background: "var(--c-surface)", borderRadius: 14, padding: 12, border: "1px solid var(--c-border)" }}>
-                  <MediaThumb src={s.photo_url} style={{ width: "100%", maxHeight: 130, objectFit: "cover", borderRadius: 10, marginBottom: 8 }} />
+                  {s.photo_url && <img src={s.photo_url} style={{ width: "100%", maxHeight: 130, objectFit: "cover", borderRadius: 10, marginBottom: 8 }} />}
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 4 }}>
                     <div style={{ fontWeight: 600, fontSize: 13 }}>{cat.label}</div>
                     <span style={{ fontSize: 10, fontWeight: 600, color: u ? u.color : "#B5451B" }}>{u ? u.label : s.urgence}</span>
@@ -7248,7 +6985,7 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
           {[...arbres].reverse().map(a => (
             <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "var(--c-surface)", borderRadius: 12, padding: 10, border: "1px solid var(--c-border)" }}>
               {a.photo_url ? (
-                <MediaThumbSmall src={a.photo_url} style={{ width: 44, height: 44, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />
+                <img src={a.photo_url} style={{ width: 44, height: 44, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />
               ) : (
                 <div style={{ width: 44, height: 44, borderRadius: 8, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "var(--c-surface-soft)" }}>
                   <IconTree size={18} color="var(--c-accent)" />
@@ -7284,7 +7021,7 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
       {panel === "securite" && <AdminSecurite session={session} />}
       {panel === "contenu_env" && <AdminContenuEnv isSuperAdmin={isSuperAdmin} adminEmail={session.user.email} />}
       {panel === "organisations" && <AdminOrganisations isSuperAdmin={isSuperAdmin} adminEmail={session.user.email} />}
-      {panel === "publications" && <AdminVerification isSuperAdmin={isSuperAdmin} adminEmail={session.user.email} />}
+      {panel === "publications" && <AdminPublications adminEmail={session.user.email} />}
       {panel === "rapports" && <AdminRapports signalements={signalements} arbres={arbres} isSuperAdmin={isSuperAdmin} centreVerrouille={centreVerrouille} onToggleCentre={toggleCentreVerrouille} />}
       {panel === "suppressions" && <AdminSuppressions />}
 
@@ -7416,675 +7153,79 @@ function AdminEvenements() {
   );
 }
 
-// ============================================================
-// Module VÉRIFICATION — Centre de contrôle PACE Connect
-// ------------------------------------------------------------
-// Vérifie l'ORGANISATION, jamais le groupe de terrain.
-// ORGANISATION → GROUPES DE TERRAIN → ACTIONS → SIGNALEMENTS
-// La vérification de l'organisation et la vérification des
-// signalements restent deux processus strictement distincts.
-// ============================================================
+function AdminPublications({ adminEmail }) {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState(null);
 
-const VERIF_NIVEAUX = [
-  { id: 0, label: "Non vérifié", court: "N0", desc: "Aucune vérification suffisante.", color: "var(--c-text-muted)" },
-  { id: 1, label: "Identifié", court: "N1", desc: "Identité et informations essentielles vérifiées.", color: "#6B7A8F" },
-  { id: 2, label: "Vérifié", court: "N2", desc: "Identité vérifiée et premières activités ou preuves confirmées.", color: "#2E6E86" },
-  { id: 3, label: "Vérifié", court: "N3", desc: "Critères principaux satisfaits ; preuves suffisantes et cohérentes.", color: "var(--c-accent-dark)" },
-  { id: 4, label: "Vérifié — historique confirmé", court: "N4", desc: "Historique solide, activités régulières, preuves nombreuses et cohérentes.", color: "#1F7A4D" },
-  { id: 5, label: "Organisation de référence sur la plateforme", court: "N5", desc: "Niveau maximal : fiabilité, transparence, régularité et qualité durables.", color: "#8A6318" },
-];
-function verifNiveauInfo(n) { return VERIF_NIVEAUX[Math.max(0, Math.min(5, n || 0))]; }
-
-const VERIF_STATUTS = {
-  aucune: { label: "Aucune vérification", color: "var(--c-text-muted)" },
-  active: { label: "Active", color: "var(--c-accent-dark)" },
-  en_reevaluation: { label: "En réévaluation", color: "#E3A73B" },
-  suspendue: { label: "Suspendue", color: "#B5451B" },
-  revoquee: { label: "Révoquée", color: "#7A1F1F" },
-  expiree: { label: "Expirée", color: "var(--c-text-faint)" },
-};
-
-const VERIF_DOC_TYPES = ["Statuts / enregistrement légal", "Récépissé / agrément officiel", "Pièce d'identité du responsable", "Rapport d'activité", "Attestation de partenariat", "Justificatif financier", "Autre document"];
-
-const VERIF_PREUVE_TYPES = [
-  { id: "photo", label: "Photographie" },
-  { id: "video", label: "Vidéo" },
-  { id: "rapport", label: "Rapport" },
-  { id: "document", label: "Document" },
-  { id: "gps", label: "Coordonnées GPS" },
-  { id: "temoignage", label: "Témoignage" },
-  { id: "validation_externe", label: "Validation externe" },
-];
-
-const VERIF_MOTIFS_REJET = [
-  { id: "preuve_insuffisante", label: "Preuve insuffisante" },
-  { id: "document_invalide", label: "Document invalide" },
-  { id: "information_incoherente", label: "Information incohérente" },
-  { id: "localisation_non_verifiable", label: "Localisation non vérifiable" },
-  { id: "date_incoherente", label: "Date incohérente" },
-  { id: "doublon", label: "Doublon" },
-  { id: "ne_correspond_pas_activite", label: "Ne correspond pas à l'activité" },
-  { id: "origine_non_verifiable", label: "Origine non vérifiable" },
-  { id: "autre", label: "Autre" },
-];
-
-const VERIF_HISTORIQUE_LABELS = {
-  demande_creee: "Demande créée",
-  document_ajoute: "Document ajouté",
-  document_accepte: "Document accepté",
-  document_rejete: "Document rejeté",
-  preuve_ajoutee: "Preuve ajoutée",
-  preuve_acceptee: "Preuve acceptée",
-  preuve_rejetee: "Preuve rejetée",
-  informations_demandees: "Informations complémentaires demandées",
-  verification_approuvee: "Vérification approuvée",
-  verification_refusee: "Vérification refusée",
-  niveau_modifie: "Niveau modifié",
-  score_modifie: "Score modifié",
-  verification_suspendue: "Vérification suspendue",
-  verification_revoquee: "Vérification révoquée",
-  verification_renouvelee: "Vérification renouvelée",
-  statut_verification_modifie: "Statut de vérification modifié",
-};
-
-async function logVerifHistorique(organisationId, evenement, acteur, detail) {
-  try {
-    await supabase.from("org_verification_historique").insert({
-      organisation_id: organisationId, evenement, acteur, detail: detail || null,
-    });
-  } catch (e) { /* journal best-effort */ }
-}
-
-function VerifBadge({ color, children }) {
-  return <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 9px", borderRadius: 999, background: color, color: "#fff", whiteSpace: "nowrap" }}>{children}</span>;
-}
-
-// Petit champ fichier générique (image ou document) réutilisé pour les
-// pièces justificatives et les preuves du dossier de vérification.
-function VerifFileInput({ value, onChange, label }) {
-  const [busy, setBusy] = useState(false);
-  async function handleFile(e) {
-    const f = e.target.files && e.target.files[0];
-    if (!f) return;
-    setBusy(true);
-    try {
-      const reader = new FileReader();
-      const dataUrl = await new Promise((resolve, reject) => {
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = reject;
-        reader.readAsDataURL(f);
-      });
-      const isImg = f.type && f.type.startsWith("image/");
-      const finalDataUrl = isImg ? await compressImage(dataUrl) : dataUrl;
-      const url = await uploadPhotoGeneric(finalDataUrl, "verifications");
-      if (url) onChange(url);
-      else alert("Échec de l'envoi du fichier. Réessaie.");
-    } finally {
-      setBusy(false);
-      e.target.value = "";
-    }
+  async function load() {
+    setLoading(true);
+    const { data } = await supabase.from("gt_publication_demandes")
+      .select("*, gt_groupes(nom, objectif, code_groupe)")
+      .eq("statut", "en_attente").order("created_at", { ascending: true });
+    setItems(data || []);
+    setLoading(false);
   }
+  useEffect(() => { load(); }, []);
+
+  async function approuver(d) {
+    setBusyId(d.id);
+    await supabase.from("gt_publication_demandes").update({
+      statut: "approuvee", decide_par: adminEmail, decided_at: new Date().toISOString(),
+    }).eq("id", d.id);
+    await supabase.from("gt_groupes").update({
+      publication_statut: "approuvee", objectifs_atteints: true, objectifs_atteints_le: new Date().toISOString(),
+    }).eq("id", d.groupe_id);
+    logGroupeAudit(d.groupe_id, "certification_approuvee", "gt_publication_demandes", d.id);
+    setBusyId(null);
+    load();
+  }
+
+  async function refuser(d) {
+    const motif = prompt("Motif du refus (visible par le groupe) :");
+    if (motif === null) return;
+    setBusyId(d.id);
+    await supabase.from("gt_publication_demandes").update({
+      statut: "refusee", decision_motif: motif || null, decide_par: adminEmail, decided_at: new Date().toISOString(),
+    }).eq("id", d.id);
+    await supabase.from("gt_groupes").update({ publication_statut: "refusee" }).eq("id", d.groupe_id);
+    logGroupeAudit(d.groupe_id, "certification_refusee", "gt_publication_demandes", d.id, motif || null);
+    setBusyId(null);
+    load();
+  }
+
   return (
-    <div style={{ marginBottom: 10 }}>
-      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--c-text-secondary)", marginBottom: 5 }}>{label || "Fichier"}</div>
-      {value ? (
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <a href={value} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11.5, color: "var(--c-accent-dark)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }}>Voir le fichier joint</a>
-          <button type="button" onClick={() => onChange(null)} style={{ background: "none", border: "1px solid var(--c-border)", borderRadius: 8, padding: "3px 8px", fontSize: 10.5, cursor: "pointer", color: "var(--c-text-muted)" }}>Retirer</button>
-        </div>
+    <div>
+      <div style={{ fontSize: 11.5, color: "var(--c-text-muted)", marginBottom: 12 }}>
+        Demandes de certification envoyées par des groupes de terrain, avec leur justification et leurs preuves.
+      </div>
+      {loading ? <div style={{ textAlign: "center", color: "var(--c-text-muted)", fontSize: 13 }}>Chargement…</div> : items.length === 0 ? (
+        <div style={{ color: "var(--c-text-muted)", fontSize: 13, textAlign: "center", padding: 12 }}>Aucune demande en attente.</div>
       ) : (
-        <label style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 8, border: "1.5px dashed var(--c-text-faint)", fontSize: 11.5, color: "var(--c-text-secondary)", cursor: "pointer" }}>
-          <input type="file" onChange={handleFile} style={{ display: "none" }} />
-          {busy ? "Envoi…" : "Joindre un fichier"}
-        </label>
-      )}
-    </div>
-  );
-}
-
-// ------------------------------------------------------------
-// Vue liste : toutes les organisations avec leur état de vérification
-// ------------------------------------------------------------
-function AdminVerification({ isSuperAdmin, adminEmail }) {
-  const [organisations, setOrganisations] = useState(null);
-  const [selected, setSelected] = useState(null);
-  const [filtre, setFiltre] = useState("toutes");
-
-  async function charger() {
-    const { data } = await supabase.from("organisations").select("*").eq("is_deleted", false).order("created_at", { ascending: false });
-    setOrganisations(data || []);
-  }
-  useEffect(() => { charger(); }, []);
-
-  if (selected) {
-    return (
-      <VerificationDossier
-        organisationId={selected}
-        adminEmail={adminEmail}
-        isSuperAdmin={isSuperAdmin}
-        onBack={() => { setSelected(null); charger(); }}
-      />
-    );
-  }
-
-  if (organisations === null) return <div style={{ textAlign: "center", color: "var(--c-text-muted)", fontSize: 13 }}>Chargement…</div>;
-
-  const filtered = organisations.filter(o => {
-    if (filtre === "toutes") return true;
-    if (filtre === "a_traiter") return o.statut_verification === "aucune" || o.statut_verification === "en_reevaluation";
-    return o.statut_verification === filtre;
-  });
-
-  return (
-    <div>
-      <div style={{ fontSize: 11.5, color: "var(--c-text-muted)", lineHeight: 1.5, marginBottom: 12 }}>
-        Vérification interne des <strong>organisations</strong> par l'équipe PACE Connect, sur la base des documents et preuves soumis sur la plateforme. Ce niveau ne constitue pas une certification légale, réglementaire ou institutionnelle. Il ne certifie pas non plus les groupes de terrain de l'organisation, ni ses signalements.
-      </div>
-
-      <div style={{ display: "flex", gap: 6, marginBottom: 14, overflowX: "auto" }}>
-        {[["toutes", "Toutes"], ["a_traiter", "À traiter"], ["active", "Actives"], ["suspendue", "Suspendues"], ["revoquee", "Révoquées"]].map(([id, label]) => (
-          <button key={id} onClick={() => setFiltre(id)} style={{
-            padding: "6px 12px", borderRadius: 20, fontSize: 11.5, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap",
-            border: filtre === id ? "1px solid var(--c-accent-dark)" : "1px solid var(--c-border)",
-            background: filtre === id ? "var(--c-accent-dark)" : "var(--c-surface)", color: filtre === id ? "#fff" : "var(--c-text-secondary)" }}>{label}</button>
-        ))}
-      </div>
-
-      {filtered.length === 0 && <div style={{ textAlign: "center", color: "var(--c-text-muted)", fontSize: 13, padding: 20 }}>Aucune organisation ici.</div>}
-
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {filtered.map(o => {
-          const niv = verifNiveauInfo(o.niveau_verification);
-          const st = VERIF_STATUTS[o.statut_verification] || VERIF_STATUTS.aucune;
-          return (
-            <button key={o.id} onClick={() => setSelected(o.id)} style={{
-              textAlign: "left", background: "var(--c-surface)", border: "1px solid var(--c-border)", borderRadius: 12, padding: 14, cursor: "pointer" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
-                <div>
-                  <div style={{ fontFamily: "Fraunces, serif", fontSize: 14, fontWeight: 600, color: "var(--c-text)" }}>{o.nom}</div>
-                  <div style={{ fontSize: 11, color: "var(--c-text-muted)" }}>{o.type === "ong" ? "ONG" : "Gouvernement"} · {[o.ville, o.pays].filter(Boolean).join(", ") || "zone non précisée"}</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {items.map(d => (
+            <div key={d.id} style={{ background: "var(--c-surface)", borderRadius: 12, padding: 12, border: "1px solid var(--c-border)" }}>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>{d.gt_groupes ? d.gt_groupes.nom : "Groupe inconnu"}</div>
+              {d.gt_groupes && d.gt_groupes.objectif && <div style={{ fontSize: 11, color: "var(--c-text-muted)", marginTop: 2 }}>{d.gt_groupes.objectif}</div>}
+              <div style={{ fontSize: 12, color: "var(--c-text-secondary)", marginTop: 6 }}>{d.justification}</div>
+              {Array.isArray(d.items) && d.items.length > 0 && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                  {d.items.map((it, i) => <span key={i} style={{ fontSize: 10.5, background: "var(--c-surface-soft)", borderRadius: 999, padding: "4px 8px" }}>{it}</span>)}
                 </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-end", flexShrink: 0 }}>
-                  <VerifBadge color={niv.color}>{niv.court} · {niv.label}</VerifBadge>
-                  <VerifBadge color={st.color}>{st.label}</VerifBadge>
-                </div>
+              )}
+              <div style={{ fontSize: 10.5, color: "var(--c-text-muted)", marginTop: 8 }}>
+                Demandé le {new Date(d.created_at).toLocaleDateString("fr-FR")}
               </div>
-              <div style={{ fontSize: 11, color: "var(--c-text-secondary)", marginTop: 8 }}>Score de confiance : <strong>{o.score_confiance || 0}/100</strong></div>
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-// ------------------------------------------------------------
-// Dossier de vérification d'une organisation
-// ------------------------------------------------------------
-function VerificationDossier({ organisationId, adminEmail, isSuperAdmin, onBack }) {
-  const [org, setOrg] = useState(null);
-  const [documents, setDocuments] = useState([]);
-  const [preuves, setPreuves] = useState([]);
-  const [groupes, setGroupes] = useState([]);
-  const [activites, setActivites] = useState([]);
-  const [decisions, setDecisions] = useState([]);
-  const [historique, setHistorique] = useState([]);
-  const [defisIndex, setDefisIndex] = useState({});
-  const [busy, setBusy] = useState(false);
-
-  const [niveauEdit, setNiveauEdit] = useState(0);
-  const [scoreEdit, setScoreEdit] = useState(0);
-
-  const [showDocForm, setShowDocForm] = useState(false);
-  const [showPreuveForm, setShowPreuveForm] = useState(false);
-  const [decisionEnCours, setDecisionEnCours] = useState(null); // "approuver" | "demander_informations" | "refuser"
-  const [justification, setJustification] = useState("");
-  const [observations, setObservations] = useState("");
-
-  async function charger() {
-    const [{ data: o }, { data: docs }, { data: pv }, { data: gr }, { data: act }, { data: dec }, { data: hist }, { data: defis }] = await Promise.all([
-      supabase.from("organisations").select("*").eq("id", organisationId).single(),
-      supabase.from("org_verification_documents").select("*").eq("organisation_id", organisationId).order("created_at", { ascending: false }),
-      supabase.from("org_verification_preuves").select("*").eq("organisation_id", organisationId).order("created_at", { ascending: false }),
-      supabase.from("gt_groupes").select("*").eq("organisation_id", organisationId).eq("is_deleted", false).order("created_at", { ascending: false }),
-      supabase.from("org_activites").select("*").eq("organisation_id", organisationId).order("date_debut", { ascending: false }),
-      supabase.from("org_verification_decisions").select("*").eq("organisation_id", organisationId).order("decided_at", { ascending: false }),
-      supabase.from("org_verification_historique").select("*").eq("organisation_id", organisationId).order("created_at", { ascending: false }),
-      supabase.from("env_defis").select("id, nom"),
-    ]);
-    setOrg(o || null);
-    setDocuments(docs || []);
-    setPreuves(pv || []);
-    setGroupes(gr || []);
-    setActivites(act || []);
-    setDecisions(dec || []);
-    setHistorique(hist || []);
-    const idx = {}; (defis || []).forEach(d => { idx[d.id] = champTexte(d.nom) || d.id; });
-    setDefisIndex(idx);
-    if (o) { setNiveauEdit(o.niveau_verification || 0); setScoreEdit(o.score_confiance || 0); }
-  }
-  useEffect(() => { charger(); }, [organisationId]);
-
-  async function actorLog(action, detail) {
-    await logAudit(`verification_${action}`, "organisations", organisationId, detail || null, { organisation: org ? org.nom : null });
-    await logVerifHistorique(organisationId, action, adminEmail, detail || null);
-  }
-
-  // -- Documents --------------------------------------------------
-  async function ajouterDocument(payload) {
-    setBusy(true);
-    await supabase.from("org_verification_documents").insert({ organisation_id: organisationId, ...payload, created_by: adminEmail });
-    await actorLog("document_ajoute", payload.type);
-    setShowDocForm(false);
-    setBusy(false);
-    charger();
-  }
-  async function statuerDocument(doc, statut) {
-    let motif = null;
-    if (statut === "rejete") { motif = prompt("Motif du rejet du document (obligatoire) :"); if (!motif) return; }
-    setBusy(true);
-    await supabase.from("org_verification_documents").update({
-      statut, motif_rejet: motif, verifie_par: adminEmail, verifie_le: new Date().toISOString(),
-    }).eq("id", doc.id);
-    await actorLog(statut === "accepte" ? "document_accepte" : "document_rejete", motif || doc.type);
-    setBusy(false);
-    charger();
-  }
-
-  // -- Preuves ------------------------------------------------------
-  async function ajouterPreuve(payload) {
-    setBusy(true);
-    await supabase.from("org_verification_preuves").insert({ organisation_id: organisationId, ...payload, created_by: adminEmail });
-    await actorLog("preuve_ajoutee", payload.type);
-    setShowPreuveForm(false);
-    setBusy(false);
-    charger();
-  }
-  async function statuerPreuve(preuve, statut, motifRejet, motifDetail) {
-    setBusy(true);
-    await supabase.from("org_verification_preuves").update({
-      statut, motif_rejet: statut === "rejetee" ? motifRejet : null, motif_detail: statut === "rejetee" ? (motifDetail || null) : null,
-      verifie_par: adminEmail, verifie_le: new Date().toISOString(),
-    }).eq("id", preuve.id);
-    await actorLog(statut === "acceptee" ? "preuve_acceptee" : "preuve_rejetee", statut === "rejetee" ? (VERIF_MOTIFS_REJET.find(m => m.id === motifRejet) || {}).label : preuve.type);
-    setBusy(false);
-    charger();
-  }
-
-  // -- Niveau / score -------------------------------------------------
-  async function enregistrerNiveauScore() {
-    setBusy(true);
-    const changements = [];
-    if (org && niveauEdit !== org.niveau_verification) changements.push(actorLog("niveau_modifie", `${verifNiveauInfo(org.niveau_verification).label} → ${verifNiveauInfo(niveauEdit).label}`));
-    if (org && scoreEdit !== org.score_confiance) changements.push(actorLog("score_modifie", `${org.score_confiance || 0}/100 → ${scoreEdit}/100`));
-    await supabase.from("organisations").update({
-      niveau_verification: niveauEdit, score_confiance: scoreEdit, derniere_verification: new Date().toISOString(),
-    }).eq("id", organisationId);
-    await Promise.all(changements);
-    setBusy(false);
-    charger();
-  }
-
-  // -- Décision du Centre de contrôle ----------------------------------
-  async function soumettreDecision() {
-    if (!justification.trim()) { alert("La justification est obligatoire."); return; }
-    setBusy(true);
-    const elementsExamines = {
-      documents_acceptes: documents.filter(d => d.statut === "accepte").length,
-      documents_rejetes: documents.filter(d => d.statut === "rejete").length,
-      preuves_acceptees: preuves.filter(p => p.statut === "acceptee").length,
-      preuves_rejetees: preuves.filter(p => p.statut === "rejetee").length,
-      groupes_rattaches: groupes.length,
-      activites_declarees: activites.length,
-    };
-    await supabase.from("org_verification_decisions").insert({
-      organisation_id: organisationId, decision: decisionEnCours,
-      niveau_attribue: niveauEdit, score_confiance: scoreEdit,
-      justification: justification.trim(), observations: observations.trim() || null,
-      elements_examines: elementsExamines, decide_par: adminEmail,
-    });
-
-    const patch = { derniere_verification: new Date().toISOString() };
-    if (decisionEnCours === "approuver") {
-      patch.niveau_verification = niveauEdit;
-      patch.score_confiance = scoreEdit;
-      patch.statut_verification = "active";
-      patch.date_verification = new Date().toISOString();
-      const prochaine = new Date(); prochaine.setDate(prochaine.getDate() + 180);
-      patch.prochaine_reevaluation = prochaine.toISOString();
-    } else if (decisionEnCours === "refuser") {
-      patch.statut_verification = "aucune";
-      patch.score_confiance = scoreEdit;
-    } else {
-      patch.statut_verification = org.statut_verification === "aucune" ? "aucune" : "en_reevaluation";
-    }
-    await supabase.from("organisations").update(patch).eq("id", organisationId);
-
-    const evt = decisionEnCours === "approuver" ? "verification_approuvee" : decisionEnCours === "refuser" ? "verification_refusee" : "informations_demandees";
-    await actorLog(evt, justification.trim());
-
-    setDecisionEnCours(null); setJustification(""); setObservations("");
-    setBusy(false);
-    charger();
-  }
-
-  // -- Cycle de vie -----------------------------------------------------
-  async function changerStatutVerification(nouveauStatut) {
-    const motif = prompt(`Motif du passage au statut « ${VERIF_STATUTS[nouveauStatut].label} » (obligatoire) :`);
-    if (!motif) return;
-    setBusy(true);
-    await supabase.from("organisations").update({ statut_verification: nouveauStatut }).eq("id", organisationId);
-    const evt = nouveauStatut === "suspendue" ? "verification_suspendue" : nouveauStatut === "revoquee" ? "verification_revoquee" : nouveauStatut === "active" ? "verification_renouvelee" : "statut_verification_modifie";
-    await actorLog(evt, motif);
-    setBusy(false);
-    charger();
-  }
-
-  if (!org) return <div style={{ textAlign: "center", color: "var(--c-text-muted)", fontSize: 13 }}>Chargement du dossier…</div>;
-
-  const niv = verifNiveauInfo(org.niveau_verification);
-  const st = VERIF_STATUTS[org.statut_verification] || VERIF_STATUTS.aucune;
-
-  return (
-    <div>
-      <button onClick={onBack} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--c-text-muted)", fontSize: 12, cursor: "pointer", marginBottom: 12, padding: 0 }}>
-        <IconChevronLeft size={14} /> Toutes les organisations
-      </button>
-
-      {/* A — Identité */}
-      <div style={{ background: "var(--c-surface)", border: "1px solid var(--c-border)", borderRadius: 12, padding: 14, marginBottom: 12 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, marginBottom: 6 }}>
-          <div>
-            <div style={{ fontFamily: "Fraunces, serif", fontSize: 16, fontWeight: 600 }}>{org.nom}</div>
-            <div style={{ fontSize: 11, color: "var(--c-text-muted)" }}>{org.type === "ong" ? "ONG" : "Gouvernement"} · {org.email}</div>
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-end", flexShrink: 0 }}>
-            <VerifBadge color={niv.color}>{niv.court} · {niv.label}</VerifBadge>
-            <VerifBadge color={st.color}>{st.label}</VerifBadge>
-          </div>
-        </div>
-        <div style={{ fontSize: 11.5, color: "var(--c-text-secondary)", lineHeight: 1.6 }}>
-          <div><strong>Zone d'intervention :</strong> {[org.ville, org.pays].filter(Boolean).join(", ") || "non précisée"}</div>
-          <div><strong>Domaine(s) :</strong> {(org.defis || []).map(id => defisIndex[id] || id).join(", ") || "aucun"}</div>
-          {org.numero_enregistrement && <div><strong>N° d'enregistrement :</strong> {org.numero_enregistrement}</div>}
-          <div><strong>Compte plateforme :</strong> {(ORG_ADMIN_STATUTS[org.statut] || { label: org.statut }).label}</div>
-        </div>
-        <div style={{ display: "flex", gap: 14, marginTop: 10, fontSize: 10.5, color: "var(--c-text-muted)" }}>
-          <span>{groupes.length} groupe(s) de terrain</span>
-          <span>{activites.length} activité(s)</span>
-          <span>{preuves.filter(p => p.statut === "acceptee").length} preuve(s) acceptée(s)</span>
-          <span>{preuves.filter(p => p.statut === "rejetee").length} preuve(s) rejetée(s)</span>
-        </div>
-        {org.date_verification && <div style={{ fontSize: 10.5, color: "var(--c-text-muted)", marginTop: 4 }}>Vérifiée le {new Date(org.date_verification).toLocaleDateString("fr-FR")} · Dernière vérification {org.derniere_verification ? new Date(org.derniere_verification).toLocaleDateString("fr-FR") : "—"} · Prochaine réévaluation {org.prochaine_reevaluation ? new Date(org.prochaine_reevaluation).toLocaleDateString("fr-FR") : "—"}</div>}
-      </div>
-
-      {/* B — Documents justificatifs */}
-      <DossierSection title="Documents justificatifs" count={documents.length} action={<button onClick={() => setShowDocForm(v => !v)} style={miniBtnStyle}>{showDocForm ? "Annuler" : "+ Ajouter"}</button>}>
-        {showDocForm && <DocumentForm onSubmit={ajouterDocument} busy={busy} />}
-        {documents.length === 0 && <EmptyNote>Aucun document soumis.</EmptyNote>}
-        {documents.map(d => (
-          <div key={d.id} style={itemCardStyle}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-              <div>
-                <div style={{ fontWeight: 600, fontSize: 12.5 }}>{d.type}</div>
-                {d.reference && <div style={{ fontSize: 10.5, color: "var(--c-text-muted)" }}>Réf. {d.reference}</div>}
-                {d.date_document && <div style={{ fontSize: 10.5, color: "var(--c-text-muted)" }}>Daté du {new Date(d.date_document).toLocaleDateString("fr-FR")}</div>}
+              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                <button onClick={() => approuver(d)} disabled={busyId === d.id} style={{ flex: 1, padding: "8px 0", borderRadius: 8, border: "none", background: "var(--c-accent-dark)", color: "#fff", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>
+                  {busyId === d.id ? "…" : "Certifier"}
+                </button>
+                <button onClick={() => refuser(d)} disabled={busyId === d.id} style={{ flex: 1, padding: "8px 0", borderRadius: 8, border: "1px solid var(--c-border)", background: "var(--c-surface)", color: "#B5451B", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>
+                  Refuser
+                </button>
               </div>
-              <StatutBadge statut={d.statut} labels={{ a_examiner: "À examiner", accepte: "Accepté", rejete: "Rejeté" }} colors={{ a_examiner: "#E3A73B", accepte: "var(--c-accent-dark)", rejete: "#B5451B" }} />
-            </div>
-            {d.fichier_url && <a href={d.fichier_url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: "var(--c-accent-dark)" }}>Voir le fichier</a>}
-            {d.motif_rejet && <div style={{ fontSize: 10.5, color: "#B5451B", marginTop: 4 }}>Motif : {d.motif_rejet}</div>}
-            {d.statut === "a_examiner" && (
-              <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-                <button disabled={busy} onClick={() => statuerDocument(d, "accepte")} style={acceptBtnStyle}>Accepter</button>
-                <button disabled={busy} onClick={() => statuerDocument(d, "rejete")} style={rejectBtnStyle}>Rejeter</button>
-              </div>
-            )}
-          </div>
-        ))}
-      </DossierSection>
-
-      {/* C — Activités (lecture seule) */}
-      <DossierSection title="Activités déclarées" count={activites.length}>
-        {activites.length === 0 && <EmptyNote>Aucune activité enregistrée sur la plateforme.</EmptyNote>}
-        {activites.map(a => (
-          <div key={a.id} style={itemCardStyle}>
-            <div style={{ fontWeight: 600, fontSize: 12.5 }}>{a.titre}</div>
-            <div style={{ fontSize: 10.5, color: "var(--c-text-muted)" }}>
-              {a.type || "activité"} · {a.lieu || "lieu non précisé"} · {a.date_debut ? new Date(a.date_debut).toLocaleDateString("fr-FR") : "date inconnue"} · {a.statut}
-            </div>
-          </div>
-        ))}
-      </DossierSection>
-
-      {/* D — Preuves */}
-      <DossierSection title="Preuves" count={preuves.length} action={<button onClick={() => setShowPreuveForm(v => !v)} style={miniBtnStyle}>{showPreuveForm ? "Annuler" : "+ Ajouter"}</button>}>
-        {showPreuveForm && <PreuveForm activites={activites} onSubmit={ajouterPreuve} busy={busy} />}
-        {preuves.length === 0 && <EmptyNote>Aucune preuve fournie. Une preuve n'est jamais valide du seul fait qu'elle a été fournie : chacune doit être examinée.</EmptyNote>}
-        {preuves.map(p => (
-          <PreuveItem key={p.id} preuve={p} onStatuer={statuerPreuve} busy={busy} />
-        ))}
-      </DossierSection>
-
-      {/* E — Groupes de terrain (lecture seule, distincts de la vérification) */}
-      <DossierSection title="Groupes de terrain rattachés" count={groupes.length}>
-        <div style={{ fontSize: 10.5, color: "var(--c-text-muted)", marginBottom: 8, lineHeight: 1.5 }}>
-          Un groupe n'est jamais vérifié individuellement : il hérite seulement de l'affichage du niveau de son organisation de rattachement.
-        </div>
-        {groupes.length === 0 && <EmptyNote>Aucun groupe de terrain rattaché.</EmptyNote>}
-        {groupes.map(g => (
-          <div key={g.id} style={itemCardStyle}>
-            <div style={{ fontWeight: 600, fontSize: 12.5 }}>{g.nom} <span style={{ fontWeight: 400, color: "var(--c-text-muted)", fontSize: 10.5 }}>· {g.code_groupe}</span></div>
-            <div style={{ fontSize: 10.5, color: "var(--c-text-muted)" }}>{g.objectif || "sans objectif déclaré"} · statut : {g.statut}</div>
-          </div>
-        ))}
-      </DossierSection>
-
-      {/* F — Score de confiance & niveau */}
-      <DossierSection title="Niveau &amp; score de confiance">
-        <div style={{ fontSize: 10.5, color: "var(--c-text-muted)", marginBottom: 10, lineHeight: 1.5 }}>
-          Le score de confiance de l'organisation ne détermine jamais la fiabilité d'un signalement : chaque signalement garde sa propre vérification.
-        </div>
-        <div style={{ fontSize: 11, fontWeight: 600, color: "var(--c-text-secondary)", marginBottom: 6 }}>Niveau de vérification</div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginBottom: 12 }}>
-          {VERIF_NIVEAUX.map(n => (
-            <button key={n.id} onClick={() => setNiveauEdit(n.id)} style={{
-              padding: "8px 4px", borderRadius: 10, fontSize: 10.5, fontWeight: 600, cursor: "pointer", textAlign: "center",
-              border: niveauEdit === n.id ? `2px solid ${n.color}` : "1px solid var(--c-border)",
-              background: niveauEdit === n.id ? "var(--c-surface-soft)" : "var(--c-surface)", color: niveauEdit === n.id ? n.color : "var(--c-text-secondary)" }}>
-              {n.court}<br />{n.label}
-            </button>
-          ))}
-        </div>
-        <div style={{ fontSize: 10.5, color: "var(--c-text-muted)", marginBottom: 12 }}>{verifNiveauInfo(niveauEdit).desc}</div>
-
-        <div style={{ fontSize: 11, fontWeight: 600, color: "var(--c-text-secondary)", marginBottom: 6 }}>Score de confiance : {scoreEdit}/100</div>
-        <input type="range" min="0" max="100" value={scoreEdit} onChange={e => setScoreEdit(parseInt(e.target.value, 10))} style={{ width: "100%", marginBottom: 12 }} />
-
-        <button disabled={busy} onClick={enregistrerNiveauScore} style={{ ...primaryBtnStyle, width: "100%" }}>Enregistrer le niveau et le score</button>
-      </DossierSection>
-
-      {/* G — Décision du Centre de contrôle */}
-      <DossierSection title="Décision du Centre de contrôle">
-        {!decisionEnCours ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <button disabled={busy} onClick={() => setDecisionEnCours("approuver")} style={{ ...primaryBtnStyle, width: "100%" }}>✓ Approuver la vérification</button>
-            <button disabled={busy} onClick={() => setDecisionEnCours("demander_informations")} style={{ ...secondaryBtnStyle, width: "100%" }}>Demander des informations complémentaires</button>
-            <button disabled={busy} onClick={() => setDecisionEnCours("refuser")} style={{ ...rejectBtnStyle, width: "100%", padding: "10px 0" }}>✕ Refuser</button>
-          </div>
-        ) : (
-          <div>
-            <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 8 }}>
-              {decisionEnCours === "approuver" ? "Approuver la vérification" : decisionEnCours === "refuser" ? "Refuser la vérification" : "Demander des informations complémentaires"}
-            </div>
-            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--c-text-secondary)", marginBottom: 5 }}>Justification (obligatoire)</div>
-            <textarea value={justification} onChange={e => setJustification(e.target.value)} rows={3} style={textareaStyle} placeholder="Éléments examinés, motif de la décision…" />
-            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--c-text-secondary)", margin: "8px 0 5px" }}>Observations (optionnel)</div>
-            <textarea value={observations} onChange={e => setObservations(e.target.value)} rows={2} style={textareaStyle} placeholder="Notes internes…" />
-            <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-              <button onClick={() => { setDecisionEnCours(null); setJustification(""); setObservations(""); }} style={{ ...secondaryBtnStyle, flex: 1 }}>Annuler</button>
-              <button disabled={busy || !justification.trim()} onClick={soumettreDecision} style={{ ...primaryBtnStyle, flex: 1 }}>Confirmer</button>
-            </div>
-          </div>
-        )}
-
-        {decisions.length > 0 && (
-          <div style={{ marginTop: 14 }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--c-text-secondary)", marginBottom: 6 }}>Décisions précédentes</div>
-            {decisions.map(d => (
-              <div key={d.id} style={{ ...itemCardStyle, marginBottom: 6 }}>
-                <div style={{ fontSize: 11.5, fontWeight: 600 }}>{d.decision === "approuver" ? "Approuvée" : d.decision === "refuser" ? "Refusée" : "Informations demandées"} — niveau {d.niveau_attribue} · score {d.score_confiance}/100</div>
-                <div style={{ fontSize: 10.5, color: "var(--c-text-muted)" }}>{d.decide_par} · {new Date(d.decided_at).toLocaleString("fr-FR")}</div>
-                <div style={{ fontSize: 11, color: "var(--c-text-secondary)", marginTop: 3 }}>{d.justification}</div>
-              </div>
-            ))}
-          </div>
-        )}
-      </DossierSection>
-
-      {/* H — Cycle de vie */}
-      <DossierSection title="Cycle de vie de la vérification">
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          {Object.keys(VERIF_STATUTS).filter(s => s !== "aucune" && s !== org.statut_verification).map(s => (
-            <button key={s} disabled={busy} onClick={() => changerStatutVerification(s)} style={{
-              fontSize: 10.5, padding: "6px 11px", borderRadius: 8, cursor: "pointer", fontWeight: 600,
-              border: `1px solid ${VERIF_STATUTS[s].color}`, background: "var(--c-surface)", color: VERIF_STATUTS[s].color }}>
-              Passer à « {VERIF_STATUTS[s].label} »
-            </button>
-          ))}
-        </div>
-      </DossierSection>
-
-      {/* I — Traçabilité */}
-      <DossierSection title="Historique &amp; traçabilité" count={historique.length}>
-        {historique.length === 0 && <EmptyNote>Aucun évènement enregistré.</EmptyNote>}
-        <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 320, overflowY: "auto" }}>
-          {historique.map(h => (
-            <div key={h.id} style={{ fontSize: 11, borderLeft: "2px solid var(--c-border)", paddingLeft: 10 }}>
-              <div style={{ fontWeight: 600 }}>{VERIF_HISTORIQUE_LABELS[h.evenement] || h.evenement}</div>
-              <div style={{ color: "var(--c-text-muted)", fontSize: 10.5 }}>{h.acteur} · {new Date(h.created_at).toLocaleString("fr-FR")}</div>
-              {h.detail && <div style={{ color: "var(--c-text-secondary)", fontSize: 10.5 }}>{h.detail}</div>}
             </div>
           ))}
-        </div>
-      </DossierSection>
-    </div>
-  );
-}
-
-function DossierSection({ title, count, action, children }) {
-  return (
-    <div style={{ background: "var(--c-surface)", border: "1px solid var(--c-border)", borderRadius: 12, padding: 14, marginBottom: 12 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-        <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--c-text)" }}>{title}{typeof count === "number" && <span style={{ color: "var(--c-text-muted)", fontWeight: 400 }}> ({count})</span>}</div>
-        {action}
-      </div>
-      {children}
-    </div>
-  );
-}
-
-function EmptyNote({ children }) { return <div style={{ fontSize: 11, color: "var(--c-text-muted)", padding: "6px 0" }}>{children}</div>; }
-
-function StatutBadge({ statut, labels, colors }) {
-  return <VerifBadge color={colors[statut] || "var(--c-text-muted)"}>{labels[statut] || statut}</VerifBadge>;
-}
-
-const itemCardStyle = { background: "var(--c-bg)", border: "1px solid var(--c-border)", borderRadius: 10, padding: 10, marginBottom: 8 };
-const miniBtnStyle = { fontSize: 10.5, fontWeight: 600, padding: "5px 10px", borderRadius: 8, border: "1px solid var(--c-accent-dark)", background: "var(--c-surface)", color: "var(--c-accent-dark)", cursor: "pointer" };
-const acceptBtnStyle = { flex: 1, fontSize: 11, fontWeight: 600, padding: "6px 0", borderRadius: 8, border: "none", background: "var(--c-accent-dark)", color: "#fff", cursor: "pointer" };
-const rejectBtnStyle = { flex: 1, fontSize: 11, fontWeight: 600, padding: "6px 0", borderRadius: 8, border: "1px solid #B5451B", background: "var(--c-danger-border-soft)", color: "#B5451B", cursor: "pointer" };
-const primaryBtnStyle = { padding: "10px 0", borderRadius: 10, border: "none", background: "var(--c-accent-dark)", color: "#fff", fontWeight: 600, fontSize: 13, cursor: "pointer" };
-const secondaryBtnStyle = { padding: "10px 0", borderRadius: 10, border: "1px solid var(--c-border)", background: "var(--c-surface)", color: "var(--c-text-secondary)", fontWeight: 600, fontSize: 13, cursor: "pointer" };
-const textareaStyle = { width: "100%", padding: 10, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, boxSizing: "border-box", resize: "none", fontFamily: "Work Sans, sans-serif" };
-
-function DocumentForm({ onSubmit, busy }) {
-  const [type, setType] = useState(VERIF_DOC_TYPES[0]);
-  const [reference, setReference] = useState("");
-  const [dateDocument, setDateDocument] = useState("");
-  const [fichierUrl, setFichierUrl] = useState(null);
-  return (
-    <div style={{ ...itemCardStyle, marginBottom: 12 }}>
-      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--c-text-secondary)", marginBottom: 5 }}>Type de document</div>
-      <select value={type} onChange={e => setType(e.target.value)} style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10, boxSizing: "border-box" }}>
-        {VERIF_DOC_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-      </select>
-      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--c-text-secondary)", marginBottom: 5 }}>Référence (optionnel)</div>
-      <input value={reference} onChange={e => setReference(e.target.value)} style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10, boxSizing: "border-box" }} />
-      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--c-text-secondary)", marginBottom: 5 }}>Date du document (optionnel)</div>
-      <input type="date" value={dateDocument} onChange={e => setDateDocument(e.target.value)} style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10, boxSizing: "border-box" }} />
-      <VerifFileInput value={fichierUrl} onChange={setFichierUrl} label="Fichier joint" />
-      <button disabled={busy} onClick={() => onSubmit({ type, reference: reference || null, date_document: dateDocument || null, fichier_url: fichierUrl })} style={{ ...primaryBtnStyle, width: "100%" }}>Ajouter le document</button>
-    </div>
-  );
-}
-
-function PreuveForm({ activites, onSubmit, busy }) {
-  const [type, setType] = useState("photo");
-  const [activiteId, setActiviteId] = useState("");
-  const [description, setDescription] = useState("");
-  const [datePreuve, setDatePreuve] = useState("");
-  const [url, setUrl] = useState(null);
-  return (
-    <div style={{ ...itemCardStyle, marginBottom: 12 }}>
-      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--c-text-secondary)", marginBottom: 5 }}>Type de preuve</div>
-      <select value={type} onChange={e => setType(e.target.value)} style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10, boxSizing: "border-box" }}>
-        {VERIF_PREUVE_TYPES.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
-      </select>
-      {activites.length > 0 && (
-        <>
-          <div style={{ fontSize: 11, fontWeight: 600, color: "var(--c-text-secondary)", marginBottom: 5 }}>Activité liée (optionnel)</div>
-          <select value={activiteId} onChange={e => setActiviteId(e.target.value)} style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10, boxSizing: "border-box" }}>
-            <option value="">Aucune activité liée</option>
-            {activites.map(a => <option key={a.id} value={a.id}>{a.titre}</option>)}
-          </select>
-        </>
-      )}
-      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--c-text-secondary)", marginBottom: 5 }}>Description</div>
-      <textarea value={description} onChange={e => setDescription(e.target.value)} rows={2} style={{ ...textareaStyle, marginBottom: 10 }} placeholder="Ce que cette preuve démontre…" />
-      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--c-text-secondary)", marginBottom: 5 }}>Date de la preuve (optionnel)</div>
-      <input type="date" value={datePreuve} onChange={e => setDatePreuve(e.target.value)} style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10, boxSizing: "border-box" }} />
-      <VerifFileInput value={url} onChange={setUrl} label="Photo, vidéo ou document" />
-      <button disabled={busy} onClick={() => onSubmit({ type, activite_id: activiteId || null, description: description || null, date_preuve: datePreuve ? new Date(datePreuve).toISOString() : null, url })} style={{ ...primaryBtnStyle, width: "100%" }}>Ajouter la preuve</button>
-    </div>
-  );
-}
-
-function PreuveItem({ preuve, onStatuer, busy }) {
-  const [showRejet, setShowRejet] = useState(false);
-  const [motifRejet, setMotifRejet] = useState(VERIF_MOTIFS_REJET[0].id);
-  const [motifDetail, setMotifDetail] = useState("");
-  const typeLabel = (VERIF_PREUVE_TYPES.find(t => t.id === preuve.type) || {}).label || preuve.type;
-  return (
-    <div style={itemCardStyle}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-        <div style={{ fontWeight: 600, fontSize: 12.5 }}>{typeLabel}</div>
-        <StatutBadge statut={preuve.statut} labels={{ a_examiner: "À examiner", acceptee: "Acceptée", rejetee: "Rejetée" }} colors={{ a_examiner: "#E3A73B", acceptee: "var(--c-accent-dark)", rejetee: "#B5451B" }} />
-      </div>
-      {preuve.description && <div style={{ fontSize: 11, color: "var(--c-text-secondary)", marginTop: 3 }}>{preuve.description}</div>}
-      {preuve.url && <a href={preuve.url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: "var(--c-accent-dark)" }}>Voir le fichier</a>}
-      {preuve.date_preuve && <div style={{ fontSize: 10.5, color: "var(--c-text-muted)" }}>Datée du {new Date(preuve.date_preuve).toLocaleDateString("fr-FR")}</div>}
-      {preuve.motif_rejet && (
-        <div style={{ fontSize: 10.5, color: "#B5451B", marginTop: 4 }}>
-          Motif : {(VERIF_MOTIFS_REJET.find(m => m.id === preuve.motif_rejet) || {}).label || preuve.motif_rejet}{preuve.motif_detail ? ` — ${preuve.motif_detail}` : ""}
-        </div>
-      )}
-      {preuve.statut === "a_examiner" && !showRejet && (
-        <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-          <button disabled={busy} onClick={() => onStatuer(preuve, "acceptee")} style={acceptBtnStyle}>Accepter</button>
-          <button disabled={busy} onClick={() => setShowRejet(true)} style={rejectBtnStyle}>Rejeter</button>
-        </div>
-      )}
-      {showRejet && (
-        <div style={{ marginTop: 8 }}>
-          <select value={motifRejet} onChange={e => setMotifRejet(e.target.value)} style={{ width: "100%", padding: 8, borderRadius: 8, border: "1px solid var(--c-border)", fontSize: 12, marginBottom: 6, boxSizing: "border-box" }}>
-            {VERIF_MOTIFS_REJET.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
-          </select>
-          <textarea value={motifDetail} onChange={e => setMotifDetail(e.target.value)} rows={2} placeholder="Détail (optionnel)…" style={{ ...textareaStyle, marginBottom: 6 }} />
-          <div style={{ display: "flex", gap: 6 }}>
-            <button onClick={() => setShowRejet(false)} style={{ ...secondaryBtnStyle, flex: 1, padding: "7px 0", fontSize: 11.5 }}>Annuler</button>
-            <button disabled={busy} onClick={() => { onStatuer(preuve, "rejetee", motifRejet, motifDetail); setShowRejet(false); }} style={{ ...rejectBtnStyle, flex: 1 }}>Confirmer le rejet</button>
-          </div>
         </div>
       )}
     </div>
@@ -10266,11 +9407,11 @@ function App() {
             <IconClock size={15} /> Vérification de l'accès…
           </div>
         ) : tab === "biodiversite" && accesEtendu ? (
-          <Biodiversite observations={observations} onAdd={addObservation} onBack={() => setTab("accueil")} lang={lang} coordFormat={coordFormat} />
+          <Biodiversite observations={observations} onAdd={addObservation} onBack={() => setTab("accueil")} lang={lang} />
         ) : tab === "assistant" && accesEtendu ? (
           <AssistantIA onBack={() => setTab("accueil")} signalements={signalements} arbres={arbres} observations={observations} actualites={actualites} />
         ) : tab === "espace_org" && estOrganisationValidee ? (
-          <EspaceOrganisation organisationEmail={citoyenSession && citoyenSession.user && citoyenSession.user.email} onBack={() => setTab("accueil")} coordFormat={coordFormat} />
+          <EspaceOrganisation organisationEmail={citoyenSession && citoyenSession.user && citoyenSession.user.email} onBack={() => setTab("accueil")} />
         ) : tab === "evenements" ? (
           <Evenements onBack={() => setTab("accueil")} />
         ) : tab === "groupes_terrain" ? (
@@ -10279,7 +9420,7 @@ function App() {
           <div key={tab} className="pace-fade-in">
             {tab === "accueil" && <Accueil signalements={signalements.filter(s => s.device_id === DEVICE_ID)} arbres={arbres.filter(a => a.device_id === DEVICE_ID)} notifState={notifState} onEnableNotif={enableNotif} onOpenAdmin={() => setShowAdmin(true)} actualites={actualites} onNavigate={setTab} lang={lang} estBenevoleValide={estBenevoleValide} benevoleStatut={benevoleStatut} onBenevoleInscrit={() => { setBenevoleStatut("en_attente"); try { localStorage.setItem("pace-benevole-statut", "en_attente"); } catch (e) {} }} estOrganisationValidee={estOrganisationValidee} organisationStatut={organisationStatut} onBasculerStatutSignalement={citoyenBasculerStatutSignalement} />}
             {tab === "carte" && accesEtendu && <Carte signalements={signalements} arbres={arbres} observations={observations} onAddSignalement={addSignalement} onAddArbre={addArbre} onAddObservation={addObservation} online={online} pendingQueueCount={pendingQueueCount} onFlushQueue={flushPendingQueue} lang={lang} coordFormat={coordFormat} />}
-            {tab === "signaler" && accesEtendu && <Signaler onSubmit={addSignalement} lang={lang} coordFormat={coordFormat} />}
+            {tab === "signaler" && accesEtendu && <Signaler onSubmit={addSignalement} lang={lang} />}
             {tab === "arbre" && accesEtendu && <MonArbre arbres={arbres.filter(a => a.device_id === DEVICE_ID)} suivis={suivis} onAdd={addArbre} onAddSuivi={addSuivi} lang={lang} coordFormat={coordFormat} />}
           </div>
         )}
