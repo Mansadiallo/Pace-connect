@@ -2437,7 +2437,7 @@ function ExemplesProblemesCarousel({ lang, onNavigate, accesEtendu }) {
   );
 }
 
-function Accueil({ signalements, arbres, notifState, onEnableNotif, onOpenAdmin, actualites, onNavigate, lang, estBenevoleValide, benevoleStatut, onBenevoleInscrit, estOrganisationValidee, organisationStatut, organisationEtapeDossier, organisationEtapeMotif, onBasculerStatutSignalement }) {
+function Accueil({ signalements, arbres, notifState, onEnableNotif, onOpenAdmin, actualites, onNavigate, lang, estBenevoleValide, benevoleStatut, onBenevoleInscrit, estOrganisationValidee, organisationStatut, onBasculerStatutSignalement }) {
   const resolus = signalements.filter(s => s.statut === "resolu").length;
   const co2 = arbres.reduce((sum, a) => sum + co2EstimeParArbre(a), 0);
   const accesEtendu = estBenevoleValide || estOrganisationValidee; // bénévole validé OU organisation validée
@@ -2472,7 +2472,7 @@ function Accueil({ signalements, arbres, notifState, onEnableNotif, onOpenAdmin,
         </div>
       )}
       {!accesEtendu && <VolunteerCard lang={lang} benevoleStatut={benevoleStatut} onInscrit={onBenevoleInscrit} />}
-      {!accesEtendu && <OrganisationCard lang={lang} organisationStatut={organisationStatut} organisationEtapeDossier={organisationEtapeDossier} organisationEtapeMotif={organisationEtapeMotif} />}
+      {!accesEtendu && <OrganisationCard lang={lang} organisationStatut={organisationStatut} />}
 
       {estOrganisationValidee && (
         <button onClick={() => onNavigate("espace_org")} style={{
@@ -4699,36 +4699,16 @@ function VolunteerCard({ lang, benevoleStatut, onInscrit }) {
   );
 }
 
-const VERIF_DOC_TYPE_AGREMENT = "Récépissé / agrément officiel";
-const VERIF_DOC_TYPE_STATUTS = "Statuts / enregistrement légal";
-const VERIF_DOC_TYPE_IDENTITE = "Pièce d'identité du responsable";
-
-// Statuts fins du dossier d'admission (section 7 du cahier des charges).
-// "statut" (en_attente/valide/suspendu/bloque/rejete) reste le seul verrou
-// d'accès aux fonctionnalités ; ceci ne fait qu'enrichir le message affiché.
-const ETAPE_DOSSIER_INFO = {
-  en_attente_verification: { label: "Dossier en attente de vérification", couleur: "var(--c-warning)",
-    texte: "Votre dossier a été transmis avec succès et est actuellement en attente de vérification par l'équipe PACE Connect." },
-  en_cours_verification: { label: "Dossier en cours de vérification", couleur: "var(--c-warning)",
-    texte: "L'équipe PACE Connect examine actuellement votre dossier et les documents fournis." },
-  informations_a_completer: { label: "Informations à compléter", couleur: "#E3A73B",
-    texte: "Des informations manquent pour poursuivre l'examen de votre dossier. Contactez l'équipe PACE Connect pour savoir lesquelles." },
-  document_non_conforme: { label: "Document non conforme", couleur: "#B5451B",
-    texte: "Un ou plusieurs documents fournis ne sont pas conformes. Contactez l'équipe PACE Connect pour les corriger." },
-  agrement_invalide: { label: "Agrément invalide", couleur: "#B5451B",
-    texte: "L'agrément fourni n'a pas pu être validé par l'équipe PACE Connect." },
-  agrement_expire: { label: "Agrément expiré", couleur: "#B5451B",
-    texte: "L'agrément fourni est expiré. Contactez l'équipe PACE Connect pour régulariser votre dossier." },
-  valide: { label: "Organisation vérifiée", couleur: "var(--c-accent)",
-    texte: "Ce statut reflète les éléments vérifiés par l'équipe PACE Connect sur la base des documents et informations soumis. Il ne constitue pas un agrément délivré par PACE Connect." },
-  refuse: { label: "Dossier refusé", couleur: "var(--c-text-muted)",
-    texte: "Cette demande n'a pas été retenue par l'équipe PACE Connect. Contactez l'équipe si vous pensez qu'il s'agit d'une erreur." },
+const ORGANISATION_STATUT_INFO = {
+  en_attente: { label: "Inscription envoyée", texte: "Ta demande de compte Organisation a été reçue et est en attente de validation par l'équipe PACE.", couleur: "var(--c-warning)" },
+  valide: { label: "Organisation validée", texte: "Ton compte est validé. Tu as accès aux fonctionnalités PACE Connect ainsi qu'aux outils de ton organisation.", couleur: "var(--c-accent)" },
+  suspendu: { label: "Compte suspendu", texte: "Le compte de ton organisation a été suspendu par l'équipe PACE. Contacte l'équipe pour plus d'informations.", couleur: "#B5451B" },
+  rejete: { label: "Inscription refusée", texte: "Cette demande n'a pas été retenue par l'équipe PACE. Contacte l'équipe si tu penses qu'il s'agit d'une erreur.", couleur: "var(--c-text-muted)" },
 };
 
-function OrganisationCard({ lang, organisationStatut, organisationEtapeDossier, organisationEtapeMotif }) {
-  const [mode, setMode] = useState("choix"); // choix | inscription | recapitulatif | connexion
+function OrganisationCard({ lang, organisationStatut }) {
+  const [mode, setMode] = useState("choix"); // choix | inscription | connexion
   const [type, setType] = useState("ong");
-  const [typeOng, setTypeOng] = useState("nationale");
   const [nom, setNom] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -4736,22 +4716,7 @@ function OrganisationCard({ lang, organisationStatut, organisationEtapeDossier, 
   const [pays, setPays] = useState("");
   const [ville, setVille] = useState("");
   const [description, setDescription] = useState("");
-
-  const [numeroAgrement, setNumeroAgrement] = useState("");
-  const [dateDelivranceAgrement, setDateDelivranceAgrement] = useState("");
-  const [dateExpirationAgrement, setDateExpirationAgrement] = useState("");
-  const [autoriteDelivrance, setAutoriteDelivrance] = useState("");
-  const [docAgrementUrl, setDocAgrementUrl] = useState(null);
-  const [docStatutsUrl, setDocStatutsUrl] = useState(null);
-  const [docIdentiteUrl, setDocIdentiteUrl] = useState(null);
-  const [representantNom, setRepresentantNom] = useState("");
-  const [representantFonction, setRepresentantFonction] = useState("");
-
-  const [adresseOfficielle, setAdresseOfficielle] = useState("");
-  const [telephoneOfficiel, setTelephoneOfficiel] = useState("");
-  const [emailProfessionnel, setEmailProfessionnel] = useState("");
-  const [siteWeb, setSiteWeb] = useState("");
-
+  const [numeroEnregistrement, setNumeroEnregistrement] = useState("");
   const [codeInscription, setCodeInscription] = useState("");
   const [defisChoisis, setDefisChoisis] = useState([]);
   const [defisDisponibles, setDefisDisponibles] = useState([]);
@@ -4775,40 +4740,16 @@ function OrganisationCard({ lang, organisationStatut, organisationEtapeDossier, 
     setDefisChoisis(prev => prev.includes(id) ? prev.filter(d => d !== id) : [...prev, id]);
   }
 
-  // Contrôles obligatoires (section 12) : appliqués avant le récapitulatif ET avant
-  // la soumission finale — un champ rempli n'est jamais considéré valide par défaut.
-  function validerDossier() {
-    if (!nom.trim()) return "Le nom officiel de l'organisation est requis.";
-    if (type === "ong") {
-      if (!numeroAgrement.trim()) return "Le numéro de l'agrément ou de l'acte légal est requis.";
-      if (!dateDelivranceAgrement) return "La date de délivrance de l'agrément est requise.";
-      if (!autoriteDelivrance.trim()) return "L'autorité ayant délivré l'agrément ou l'acte légal est requise.";
-      if (!docAgrementUrl) return "Le document de l'acte d'agrément (ou document légal) est obligatoire.";
-      if (!docStatutsUrl) return "Le document des statuts de l'organisation est obligatoire.";
-      if (!representantNom.trim() || !representantFonction.trim()) return "L'identité et la fonction du représentant légal sont requises.";
-    }
-    if (defisChoisis.length === 0) return "Choisis au moins un domaine d'activité.";
-    if (!adresseOfficielle.trim() || !telephoneOfficiel.trim() || !emailProfessionnel.trim()) return "L'adresse, le téléphone et l'e-mail professionnel officiels sont requis.";
-    if (!emailProfessionnel.includes("@")) return "L'e-mail professionnel indiqué n'est pas valide.";
-    if (!codeInscription.trim()) return "Le code d'inscription des bénévoles est requis (ex : sigle de l'organisation + un numéro, comme \"PACE01\").";
-    if (!email.trim() || !email.includes("@")) return "Adresse e-mail de connexion invalide.";
-    if (!password || password.length < 8) return "Le mot de passe doit contenir au moins 8 caractères.";
-    if (password !== confirmPassword) return "Les deux mots de passe ne correspondent pas.";
-    return null;
-  }
-
-  function allerAuRecapitulatif(e) {
+  async function inscrire(e) {
     if (e && e.preventDefault) e.preventDefault();
-    const err = validerDossier();
-    if (err) { setErreur(err); return; }
     setErreur("");
-    setMode("recapitulatif");
-  }
+    if (!nom.trim()) { setErreur("Le nom de l'organisation est requis."); return; }
+    if (!codeInscription.trim()) { setErreur("Le code d'inscription est requis (ex : sigle de l'organisation + un numéro, comme \"PACE01\")."); return; }
+    if (!email.trim() || !email.includes("@")) { setErreur("Adresse e-mail invalide."); return; }
+    if (!password || password.length < 8) { setErreur("Le mot de passe doit contenir au moins 8 caractères."); return; }
+    if (password !== confirmPassword) { setErreur("Les deux mots de passe ne correspondent pas."); return; }
+    if (defisChoisis.length === 0) { setErreur("Choisis au moins un défi environnemental."); return; }
 
-  async function soumettre() {
-    const err = validerDossier();
-    if (err) { setErreur(err); setMode("inscription"); return; }
-    setErreur("");
     setBusy(true);
     // Vérification préalable du code AVANT toute tentative de création de compte : GoTrue ne
     // renvoie pas le message précis d'une exception levée par le déclencheur (juste un "Database
@@ -4816,33 +4757,20 @@ function OrganisationCard({ lang, organisationStatut, organisationEtapeDossier, 
     // message clair, plutôt que de laisser échouer l'inscription pour s'en apercevoir après coup.
     const { data: dispo, error: errCode } = await supabase.rpc("organisation_code_disponible", { p_code: codeInscription.trim() });
     if (errCode) { setBusy(false); setErreur("Impossible de vérifier le code pour le moment. Vérifie ta connexion et réessaie."); return; }
-    if (dispo === false) { setBusy(false); setErreur("Ce code d'inscription est déjà utilisé par une autre organisation. Choisis-en un autre."); setMode("inscription"); return; }
-
-    const documents = [];
-    if (docAgrementUrl) documents.push({ type: VERIF_DOC_TYPE_AGREMENT, url: docAgrementUrl });
-    if (docStatutsUrl) documents.push({ type: VERIF_DOC_TYPE_STATUTS, url: docStatutsUrl });
-    if (docIdentiteUrl) documents.push({ type: VERIF_DOC_TYPE_IDENTITE, url: docIdentiteUrl });
-
-    // Le compte Auth et le dossier complet ("organisations" + documents + historique) sont créés
-    // dans LA MÊME opération côté serveur (déclencheur sur auth.users), qui revalide aussi les
-    // champs obligatoires indépendamment de ce contrôle côté client (section 13).
+    if (dispo === false) { setBusy(false); setErreur("Ce code d'inscription est déjà utilisé par une autre organisation. Choisis-en un autre."); return; }
+    // Le compte Auth et la ligne "organisations" sont créés dans LA MÊME opération côté serveur
+    // (déclencheur sur auth.users) plutôt qu'en deux appels séparés : avec deux appels, un code
+    // déjà pris faisait échouer le 2e (l'insert organisations) alors que le 1er (auth.signUp)
+    // avait déjà réussi — laissant un compte Auth orphelin, sans ligne organisation, qui bloquait
+    // ensuite toute nouvelle tentative avec le même e-mail. Ici, si le code est déjà pris, le
+    // déclencheur fait échouer toute la transaction : aucun compte n'est créé, et on peut
+    // simplement corriger le code et réessayer avec le même e-mail.
     const { error: errSignUp } = await supabase.auth.signUp({
       email: email.trim(), password,
       options: { emailRedirectTo: urlRedirectionAuth(), data: {
-        type_compte: "organisation", nom: nom.trim(), type, pays: pays || null, ville: ville || null,
-        description: description.trim() || null, numero_agrement: numeroAgrement.trim() || null,
+        type_compte: "organisation", nom_organisation: nom.trim(), nom: nom.trim(), type, pays: pays || null, ville: ville || null,
+        description: description.trim() || null, numero_enregistrement: numeroEnregistrement.trim() || null,
         code_inscription: codeInscription.trim().toUpperCase(), defis: defisChoisis,
-        type_ong: type === "ong" ? typeOng : null,
-        date_delivrance_agrement: dateDelivranceAgrement || null,
-        date_expiration_agrement: dateExpirationAgrement || null,
-        autorite_delivrance: autoriteDelivrance.trim() || null,
-        representant_nom: representantNom.trim() || null,
-        representant_fonction: representantFonction.trim() || null,
-        adresse_officielle: adresseOfficielle.trim() || null,
-        telephone_officiel: telephoneOfficiel.trim() || null,
-        email_professionnel: emailProfessionnel.trim() || null,
-        site_web: siteWeb.trim() || null,
-        documents,
       } },
     });
     setBusy(false);
@@ -4854,8 +4782,7 @@ function OrganisationCard({ lang, organisationStatut, organisationEtapeDossier, 
         ? "Ce code d'inscription est déjà utilisé par une autre organisation. Choisis-en un autre."
         : dejaInscrit
         ? "Cette adresse e-mail est déjà associée à un compte. Connecte-toi plutôt, ou utilise une autre adresse."
-        : (msg || "Impossible de soumettre le dossier d'inscription."));
-      setMode("inscription");
+        : (msg || "Impossible de créer le compte."));
       return;
     }
     setDone(true);
@@ -4879,15 +4806,8 @@ function OrganisationCard({ lang, organisationStatut, organisationEtapeDossier, 
     setOublieMessage(error ? (error.message || "Impossible d'envoyer l'e-mail pour le moment.") : "Un e-mail de réinitialisation a été envoyé si ce compte existe.");
   }
 
-  // Un compte existe déjà : afficher son statut, pas le formulaire d'admission.
   if (organisationStatut) {
-    let info;
-    if (organisationStatut === "suspendu") info = { label: "Compte suspendu", couleur: "#B5451B", texte: "Le compte de ton organisation a été suspendu par l'équipe PACE. Contacte l'équipe pour plus d'informations." };
-    else if (organisationStatut === "bloque") info = { label: "Compte bloqué", couleur: "#7A1F1F", texte: "Le compte de ton organisation a été bloqué par l'équipe PACE. Contacte l'équipe pour plus d'informations." };
-    else if (organisationStatut === "rejete") info = ETAPE_DOSSIER_INFO.refuse;
-    else if (organisationStatut === "valide") info = ETAPE_DOSSIER_INFO.valide;
-    else info = ETAPE_DOSSIER_INFO[organisationEtapeDossier] || ETAPE_DOSSIER_INFO.en_attente_verification;
-
+    const info = ORGANISATION_STATUT_INFO[organisationStatut] || { label: organisationStatut, texte: "", couleur: "var(--c-text-muted)" };
     return (
       <div style={{ marginTop: 14, background: "var(--c-surface)", borderRadius: 14, padding: 16, border: "1px solid var(--c-border)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
@@ -4896,21 +4816,9 @@ function OrganisationCard({ lang, organisationStatut, organisationEtapeDossier, 
         </div>
         <div style={{ display: "inline-block", fontSize: 10.5, fontWeight: 700, color: "#fff", background: info.couleur, borderRadius: 999, padding: "3px 10px", marginBottom: 8 }}>{info.label}</div>
         <div style={{ fontSize: 12.5, color: "var(--c-text-secondary)", lineHeight: 1.5 }}>{info.texte}</div>
-        {organisationEtapeMotif && organisationStatut === "en_attente" && (
-          <div style={{ fontSize: 11.5, color: "var(--c-text-secondary)", lineHeight: 1.5, marginTop: 6, fontStyle: "italic" }}>{organisationEtapeMotif}</div>
-        )}
       </div>
     );
   }
-
-  const champStyle = { width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" };
-  const labelStyle = { fontSize: 11, fontWeight: 600, color: "var(--c-text-secondary)", marginBottom: 4 };
-  const sectionTitre = (n, titre) => (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "16px 0 8px" }}>
-      <span style={{ width: 20, height: 20, borderRadius: "50%", background: "var(--c-accent-dark)", color: "#fff", fontSize: 10.5, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{n}</span>
-      <span style={{ fontFamily: "Fraunces, serif", fontSize: 13.5, fontWeight: 600, color: "var(--c-text)" }}>{titre}</span>
-    </div>
-  );
 
   return (
     <div style={{ marginTop: 14, background: "var(--c-surface)", borderRadius: 14, padding: 16, border: "1px solid var(--c-border)" }}>
@@ -4920,19 +4828,19 @@ function OrganisationCard({ lang, organisationStatut, organisationEtapeDossier, 
       </div>
 
       {done ? (
-        <div style={{ fontSize: 12.5, color: "var(--c-accent)", display: "flex", alignItems: "flex-start", gap: 6, lineHeight: 1.5 }}>
-          <IconCheck size={14} style={{ marginTop: 2, flexShrink: 0 }} />
-          <span>Votre dossier a été transmis avec succès et est actuellement en attente de vérification. Confirme d'abord ton e-mail, puis attends la vérification par l'équipe PACE Connect.</span>
+        <div style={{ fontSize: 12.5, color: "var(--c-accent)", display: "flex", alignItems: "center", gap: 6 }}>
+          <IconCheck size={14} /> Demande envoyée. Confirme ton e-mail, puis attends la validation de l'équipe PACE.
         </div>
       ) : mode === "choix" ? (
         <>
           <div style={{ fontSize: 12.5, color: "var(--c-text-secondary)", marginBottom: 10 }}>Pour une ONG ou une administration publique intervenant dans un ou plusieurs domaines environnementaux.</div>
-          <button onClick={() => setMode("inscription")} style={{ padding: "9px 14px", borderRadius: 10, border: "1px solid var(--c-accent-dark)", background: "var(--c-surface)", color: "var(--c-accent-dark)", fontWeight: 600, fontSize: 12.5, cursor: "pointer", marginRight: 8 }}>Constituer un dossier</button>
+          <button onClick={() => setMode("inscription")} style={{ padding: "9px 14px", borderRadius: 10, border: "1px solid var(--c-accent-dark)", background: "var(--c-surface)", color: "var(--c-accent-dark)", fontWeight: 600, fontSize: 12.5, cursor: "pointer", marginRight: 8 }}>Créer un compte</button>
           <button onClick={() => setMode("connexion")} style={{ padding: "9px 14px", borderRadius: 10, border: "none", background: "none", color: "var(--c-text-muted)", fontWeight: 600, fontSize: 12.5, cursor: "pointer" }}>Déjà inscrit ? Se connecter</button>
         </>
       ) : mode === "connexion" ? (
         <form onSubmit={seConnecter}>
-          <input required type="email" value={loginEmail} onChange={e => setLoginEmail(e.target.value)} placeholder="Adresse e-mail de l'organisation" style={champStyle} />
+          <input required type="email" value={loginEmail} onChange={e => setLoginEmail(e.target.value)} placeholder="Adresse e-mail de l'organisation"
+            style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
           <PasswordInput value={loginPassword} onChange={e => setLoginPassword(e.target.value)} placeholder="Mot de passe"
             style={{ padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 6 }} />
           <button type="button" onClick={motDePasseOublie} disabled={oublieBusy} style={{ display: "block", marginLeft: "auto", background: "none", border: "none", color: "var(--c-accent-dark)", fontSize: 11.5, fontWeight: 600, cursor: "pointer", padding: "2px 0 8px" }}>
@@ -4945,51 +4853,9 @@ function OrganisationCard({ lang, organisationStatut, organisationEtapeDossier, 
           </button>
           <button type="button" onClick={() => setMode("choix")} style={{ width: "100%", padding: "8px 0", borderRadius: 10, border: "none", background: "none", color: "var(--c-text-muted)", fontSize: 12, cursor: "pointer" }}>Retour</button>
         </form>
-      ) : mode === "recapitulatif" ? (
-        <div>
-          <div style={{ fontSize: 12, color: "var(--c-text-muted)", marginBottom: 10, lineHeight: 1.5 }}>Vérifie les informations avant de soumettre ton dossier. Tu peux revenir en arrière pour corriger.</div>
-          {[
-            ["Type d'organisation", type === "ong" ? `ONG${typeOng ? " · " + ({ nationale: "nationale", etrangere: "étrangère", autre: "autre catégorie" })[typeOng] : ""}` : "Gouvernement"],
-            ["Nom officiel", nom],
-            ["Pays / Ville", [pays, ville].filter(Boolean).join(" · ") || "—"],
-            ...(type === "ong" ? [
-              ["N° d'agrément / acte légal", numeroAgrement],
-              ["Délivré le", dateDelivranceAgrement || "—"],
-              ["Expire le", dateExpirationAgrement || "non applicable"],
-              ["Autorité de délivrance", autoriteDelivrance],
-              ["Acte d'agrément joint", docAgrementUrl ? "✓ oui" : "—"],
-              ["Statuts joints", docStatutsUrl ? "✓ oui" : "—"],
-              ["Représentant légal", `${representantNom} — ${representantFonction}`],
-            ] : []),
-            ["Domaines d'activité", defisChoisis.map(id => champTexte((defisDisponibles.find(d => d.id === id) || {}).nom) || id).join(", ") || "—"],
-            ["Adresse officielle", adresseOfficielle],
-            ["Téléphone officiel", telephoneOfficiel],
-            ["E-mail professionnel", emailProfessionnel],
-            ["Site web", siteWeb || "—"],
-            ["Code d'inscription bénévoles", codeInscription.toUpperCase()],
-            ["E-mail de connexion", email],
-          ].map(([k, v]) => (
-            <div key={k} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12, padding: "6px 0", borderBottom: "1px solid var(--c-border)" }}>
-              <span style={{ color: "var(--c-text-muted)", flexShrink: 0 }}>{k}</span>
-              <span style={{ color: "var(--c-text)", textAlign: "right" }}>{v}</span>
-            </div>
-          ))}
-
-          <div style={{ fontSize: 10.5, color: "var(--c-text-muted)", lineHeight: 1.5, margin: "12px 0" }}>
-            En soumettant ce dossier, tu confirmes l'exactitude des informations fournies. PACE Connect ne délivre, ne renouvelle ni ne remplace aucun agrément légal : la vérification effectuée porte uniquement sur la cohérence du dossier soumis sur la plateforme.
-          </div>
-
-          {erreur && <div role="alert" style={{ fontSize: 12.5, color: "#B5451B", background: "var(--c-danger-border-soft)", borderRadius: 10, padding: "9px 12px", marginBottom: 10 }}>{erreur}</div>}
-
-          <button type="button" onClick={soumettre} disabled={busy} style={{ width: "100%", padding: "10px 0", borderRadius: 10, border: "none", background: "var(--c-accent-dark)", color: "#fff", fontWeight: 600, fontSize: 13, cursor: "pointer", marginBottom: 8 }}>
-            {busy ? "…" : "Soumettre le dossier d'inscription"}
-          </button>
-          <button type="button" onClick={() => setMode("inscription")} disabled={busy} style={{ width: "100%", padding: "8px 0", borderRadius: 10, border: "none", background: "none", color: "var(--c-text-muted)", fontSize: 12, cursor: "pointer" }}>Modifier le dossier</button>
-        </div>
       ) : (
-        <form onSubmit={allerAuRecapitulatif}>
-          {sectionTitre(1, "Type d'organisation")}
-          <div style={{ display: "flex", gap: 8, marginBottom: 4 }}>
+        <form onSubmit={inscrire}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
             {[["ong", "ONG"], ["gouvernement", "Gouvernement"]].map(([id, label]) => (
               <button key={id} type="button" onClick={() => setType(id)} style={{
                 flex: 1, padding: "9px 0", borderRadius: 10, fontSize: 12.5, fontWeight: 600, cursor: "pointer",
@@ -4997,53 +4863,25 @@ function OrganisationCard({ lang, organisationStatut, organisationEtapeDossier, 
                 background: type === id ? "var(--c-surface-soft)" : "var(--c-surface)", color: type === id ? "var(--c-accent)" : "var(--c-text-secondary)" }}>{label}</button>
             ))}
           </div>
-          {type === "ong" && (
-            <div style={{ display: "flex", gap: 6, marginBottom: 8, marginTop: 6 }}>
-              {[["nationale", "ONG nationale"], ["etrangere", "ONG étrangère"], ["autre", "Autre catégorie"]].map(([id, label]) => (
-                <button key={id} type="button" onClick={() => setTypeOng(id)} style={{
-                  flex: 1, padding: "6px 4px", borderRadius: 8, fontSize: 10.5, fontWeight: 600, cursor: "pointer",
-                  border: typeOng === id ? "1.5px solid var(--c-accent)" : "1px solid var(--c-border)",
-                  background: typeOng === id ? "var(--c-surface-soft)" : "var(--c-surface)", color: typeOng === id ? "var(--c-accent)" : "var(--c-text-secondary)" }}>{label}</button>
-              ))}
-            </div>
-          )}
 
-          {sectionTitre(2, "Identification officielle")}
-          <input required value={nom} onChange={e => setNom(e.target.value)} placeholder="Nom officiel de l'organisation" style={champStyle} />
-          <input value={pays} onChange={e => setPays(e.target.value)} placeholder="Pays" style={champStyle} />
-          <input value={ville} onChange={e => setVille(e.target.value)} placeholder="Ville" style={champStyle} />
+          <input required value={nom} onChange={e => setNom(e.target.value)} placeholder="Nom de l'organisation"
+            style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
+          <input value={pays} onChange={e => setPays(e.target.value)} placeholder="Pays"
+            style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
+          <input value={ville} onChange={e => setVille(e.target.value)} placeholder="Ville"
+            style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
+          {type === "ong" && (
+            <input value={numeroEnregistrement} onChange={e => setNumeroEnregistrement(e.target.value)} placeholder="Numéro d'enregistrement (optionnel)"
+              style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
+          )}
+          <input required value={codeInscription} onChange={e => setCodeInscription(e.target.value)} placeholder="Code d'inscription (ex : PACE01)"
+            style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 4, boxSizing: "border-box" }} />
+          <div style={{ fontSize: 10.5, color: "var(--c-text-muted)", marginBottom: 8 }}>
+            Choisis un code unique (sigle de ton organisation + un numéro, ex : "PACE01"). Tu le communiqueras à tes bénévoles pour qu'ils puissent te l'indiquer à leur inscription et devenir assignables chez toi.
+          </div>
           <textarea value={description} onChange={e => setDescription(e.target.value)} rows={2} placeholder="Brève description (optionnel)"
-            style={{ ...champStyle, fontFamily: "Work Sans, sans-serif", resize: "none" }} />
+            style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10, boxSizing: "border-box", fontFamily: "Work Sans, sans-serif", resize: "none" }} />
 
-          {type === "ong" && (
-            <>
-              {sectionTitre(3, "Statut légal et agrément")}
-              <input required value={numeroAgrement} onChange={e => setNumeroAgrement(e.target.value)} placeholder="Numéro de l'agrément ou de l'acte légal" style={champStyle} />
-              <div style={{ display: "flex", gap: 8 }}>
-                <div style={{ flex: 1 }}>
-                  <div style={labelStyle}>Date de délivrance</div>
-                  <input required type="date" value={dateDelivranceAgrement} onChange={e => setDateDelivranceAgrement(e.target.value)} style={champStyle} />
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div style={labelStyle}>Date d'expiration (si applicable)</div>
-                  <input type="date" value={dateExpirationAgrement} onChange={e => setDateExpirationAgrement(e.target.value)} style={champStyle} />
-                </div>
-              </div>
-              <input required value={autoriteDelivrance} onChange={e => setAutoriteDelivrance(e.target.value)} placeholder="Autorité ayant délivré l'agrément ou l'acte légal" style={champStyle} />
-
-              {sectionTitre(4, "Documents justificatifs")}
-              <div style={{ fontSize: 10.5, color: "var(--c-text-muted)", marginBottom: 8 }}>Formats acceptés : PDF, JPG, PNG. 10 Mo maximum par document.</div>
-              <VerifFileInput value={docAgrementUrl} onChange={setDocAgrementUrl} label="Acte d'agrément ou document légal (obligatoire)" />
-              <VerifFileInput value={docStatutsUrl} onChange={setDocStatutsUrl} label="Statuts de l'organisation (obligatoire)" />
-              <VerifFileInput value={docIdentiteUrl} onChange={setDocIdentiteUrl} label="Pièce d'identité du représentant légal (optionnel)" />
-
-              {sectionTitre(5, "Représentant légal")}
-              <input required value={representantNom} onChange={e => setRepresentantNom(e.target.value)} placeholder="Nom complet du représentant légal" style={champStyle} />
-              <input required value={representantFonction} onChange={e => setRepresentantFonction(e.target.value)} placeholder="Fonction du représentant légal" style={champStyle} />
-            </>
-          )}
-
-          {sectionTitre(6, "Domaines d'activité")}
           <div style={{ fontSize: 12, fontWeight: 600, color: "var(--c-text)", marginBottom: 6 }}>Domaine(s) d'activité *</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
             {defisDisponibles.map(d => {
@@ -5060,21 +4898,9 @@ function OrganisationCard({ lang, organisationStatut, organisationEtapeDossier, 
             {defisDisponibles.length === 0 && <div style={{ fontSize: 11, color: "var(--c-text-muted)" }}>Aucun défi publié pour le moment.</div>}
           </div>
 
-          {sectionTitre(7, "Coordonnées officielles")}
-          <input required value={adresseOfficielle} onChange={e => setAdresseOfficielle(e.target.value)} placeholder="Adresse officielle" style={champStyle} />
-          <input required value={telephoneOfficiel} onChange={e => setTelephoneOfficiel(e.target.value)} placeholder="Téléphone officiel" style={champStyle} />
-          <input required type="email" value={emailProfessionnel} onChange={e => setEmailProfessionnel(e.target.value)} placeholder="E-mail professionnel" style={champStyle} />
-          <input value={siteWeb} onChange={e => setSiteWeb(e.target.value)} placeholder="Site web (optionnel)" style={champStyle} />
-
-          {sectionTitre(8, "Code d'inscription des bénévoles")}
-          <input required value={codeInscription} onChange={e => setCodeInscription(e.target.value)} placeholder="Code d'inscription de l'organisation (ex : PACE01)" style={{ ...champStyle, marginBottom: 4 }} />
-          <div style={{ fontSize: 10.5, color: "var(--c-text-muted)", marginBottom: 8, lineHeight: 1.5 }}>
-            Créez un code unique permettant à vos bénévoles d'identifier votre organisation lors de leur inscription sur Pace Connect. Communiquez ce code uniquement aux bénévoles que vous souhaitez rattacher à votre organisation. Ce code ne constitue pas une preuve d'agrément, de reconnaissance légale ou de conformité.
-          </div>
-
-          {sectionTitre(9, "Identifiants de connexion")}
           <div style={{ fontSize: 10.5, color: "var(--c-text-muted)", margin: "2px 0 8px" }}>Un compte réel (e-mail + mot de passe) permet à plusieurs membres de ton équipe de se connecter.</div>
-          <input required type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="Adresse e-mail de connexion" style={champStyle} />
+          <input required type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="Adresse e-mail de l'organisation"
+            style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
           <PasswordInput value={password} onChange={e => setPassword(e.target.value)} placeholder="Mot de passe (8 caractères minimum)"
             style={{ padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8 }} />
           <PasswordInput value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} placeholder="Confirme le mot de passe"
@@ -5082,8 +4908,8 @@ function OrganisationCard({ lang, organisationStatut, organisationEtapeDossier, 
 
           {erreur && <div role="alert" style={{ fontSize: 12.5, color: "#B5451B", background: "var(--c-danger-border-soft)", borderRadius: 10, padding: "9px 12px", marginBottom: 10 }}>{erreur}</div>}
 
-          <button type="button" onClick={allerAuRecapitulatif} style={{ width: "100%", padding: "10px 0", borderRadius: 10, border: "none", background: "var(--c-accent-dark)", color: "#fff", fontWeight: 600, fontSize: 13, cursor: "pointer", marginBottom: 8 }}>
-            Vérifier et continuer
+          <button type="button" onClick={inscrire} disabled={busy} style={{ width: "100%", padding: "10px 0", borderRadius: 10, border: "none", background: "var(--c-accent-dark)", color: "#fff", fontWeight: 600, fontSize: 13, cursor: "pointer", marginBottom: 8 }}>
+            {busy ? "…" : "Créer le compte"}
           </button>
           <button type="button" onClick={() => setMode("choix")} style={{ width: "100%", padding: "8px 0", borderRadius: 10, border: "none", background: "none", color: "var(--c-text-muted)", fontSize: 12, cursor: "pointer" }}>Retour</button>
         </form>
@@ -7659,8 +7485,6 @@ const VERIF_HISTORIQUE_LABELS = {
   verification_revoquee: "Vérification révoquée",
   verification_renouvelee: "Vérification renouvelée",
   statut_verification_modifie: "Statut de vérification modifié",
-  dossier_soumis: "Dossier d'inscription soumis",
-  etape_dossier_modifiee: "Étape du dossier modifiée",
 };
 
 async function logVerifHistorique(organisationId, evenement, acteur, detail) {
@@ -7982,11 +7806,8 @@ function VerificationDossier({ organisationId, adminEmail, isSuperAdmin, onBack 
         <div style={{ fontSize: 11.5, color: "var(--c-text-secondary)", lineHeight: 1.6 }}>
           <div><strong>Zone d'intervention :</strong> {[org.ville, org.pays].filter(Boolean).join(", ") || "non précisée"}</div>
           <div><strong>Domaine(s) :</strong> {(org.defis || []).map(id => defisIndex[id] || id).join(", ") || "aucun"}</div>
-          {org.numero_agrement && <div><strong>N° d'agrément / acte légal :</strong> {org.numero_agrement}</div>}
-          {org.representant_nom && <div><strong>Représentant légal :</strong> {org.representant_nom}{org.representant_fonction ? ` (${org.representant_fonction})` : ""}</div>}
-          {org.adresse_officielle && <div><strong>Adresse officielle :</strong> {org.adresse_officielle}</div>}
+          {org.numero_enregistrement && <div><strong>N° d'enregistrement :</strong> {org.numero_enregistrement}</div>}
           <div><strong>Compte plateforme :</strong> {(ORG_ADMIN_STATUTS[org.statut] || { label: org.statut }).label}</div>
-          <div><strong>Étape du dossier d'admission :</strong> {(ETAPE_DOSSIER_INFO[org.etape_dossier] || {}).label || org.etape_dossier}</div>
         </div>
         <div style={{ display: "flex", gap: 14, marginTop: 10, fontSize: 10.5, color: "var(--c-text-muted)" }}>
           <span>{groupes.length} groupe(s) de terrain</span>
@@ -9430,41 +9251,12 @@ function AdminOrganisations({ isSuperAdmin, adminEmail }) {
   async function changerStatut(org, nouveauStatut, motif) {
     setBusyId(org.id);
     const payload = { statut: nouveauStatut };
-    if (nouveauStatut === "valide") {
-      payload.valide_par = adminEmail; payload.valide_le = new Date().toISOString(); payload.motif_refus = null;
-      payload.etape_dossier = "valide"; payload.etape_dossier_motif = null;
-      payload.etape_dossier_maj_le = new Date().toISOString(); payload.etape_dossier_maj_par = adminEmail;
-    }
-    if (nouveauStatut === "rejete") {
-      payload.etape_dossier = "refuse"; payload.etape_dossier_motif = motif || null;
-      payload.etape_dossier_maj_le = new Date().toISOString(); payload.etape_dossier_maj_par = adminEmail;
-    }
+    if (nouveauStatut === "valide") { payload.valide_par = adminEmail; payload.valide_le = new Date().toISOString(); payload.motif_refus = null; }
     if (nouveauStatut === "rejete" || nouveauStatut === "suspendu" || nouveauStatut === "bloque") payload.motif_refus = motif || null;
     const { error } = await supabase.from("organisations").update(payload).eq("id", org.id);
     setBusyId(null);
     if (error) { alert("Action refusée par le serveur (réservée au super-admin)."); return; }
     logAudit(`organisation_${nouveauStatut}`, "organisations", org.email, motif || null, { nom: org.nom });
-    charger();
-  }
-
-  const ETAPES_INTERMEDIAIRES = ["en_attente_verification", "en_cours_verification", "informations_a_completer", "document_non_conforme", "agrement_invalide", "agrement_expire"];
-  const ETAPES_AVEC_MOTIF = ["informations_a_completer", "document_non_conforme", "agrement_invalide", "agrement_expire"];
-
-  async function changerEtapeDossier(org, nouvelleEtape) {
-    let motif = null;
-    if (ETAPES_AVEC_MOTIF.includes(nouvelleEtape)) {
-      motif = prompt(`Précise ce qui manque ou ce qui ne va pas (« ${ETAPE_DOSSIER_INFO[nouvelleEtape].label} ») :`);
-      if (!motif) return;
-    }
-    setBusyId(org.id);
-    const { error } = await supabase.from("organisations").update({
-      etape_dossier: nouvelleEtape, etape_dossier_motif: motif,
-      etape_dossier_maj_le: new Date().toISOString(), etape_dossier_maj_par: adminEmail,
-    }).eq("id", org.id);
-    setBusyId(null);
-    if (error) { alert("Impossible de mettre à jour l'étape du dossier."); return; }
-    logAudit("organisation_etape_dossier", "organisations", org.email, motif || null, { nom: org.nom, etape: nouvelleEtape });
-    logVerifHistorique(org.id, "etape_dossier_modifiee", adminEmail, `${(ETAPE_DOSSIER_INFO[nouvelleEtape] || {}).label || nouvelleEtape}${motif ? " — " + motif : ""}`);
     charger();
   }
 
@@ -9497,32 +9289,13 @@ function AdminOrganisations({ isSuperAdmin, adminEmail }) {
                 <div style={{ fontSize: 11, color: "var(--c-text-muted)" }}>{o.type === "ong" ? "ONG" : "Gouvernement"} · {o.email}</div>
                 {(o.ville || o.pays) && <div style={{ fontSize: 11, color: "var(--c-text-muted)" }}>{[o.ville, o.pays].filter(Boolean).join(", ")}</div>}
               </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-end", flexShrink: 0 }}>
-                <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 999, background: s.color, color: "#fff" }}>{s.label}</span>
-                <span style={{ fontSize: 9.5, fontWeight: 700, padding: "2px 8px", borderRadius: 999, background: (ETAPE_DOSSIER_INFO[o.etape_dossier] || {}).couleur || "var(--c-text-muted)", color: "#fff" }}>
-                  {(ETAPE_DOSSIER_INFO[o.etape_dossier] || {}).label || o.etape_dossier}
-                </span>
-              </div>
+              <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 999, background: s.color, color: "#fff", flexShrink: 0 }}>{s.label}</span>
             </div>
             <div style={{ fontSize: 11, color: "var(--c-text-secondary)", marginTop: 8 }}>
               <b>Domaine(s) :</b> {(o.defis || []).map(id => defisIndex[id] || id).join(", ") || "aucun"}
             </div>
-            {o.numero_agrement && <div style={{ fontSize: 10.5, color: "var(--c-text-muted)" }}>N° agrément / acte légal : {o.numero_agrement}{o.date_expiration_agrement ? ` (expire le ${new Date(o.date_expiration_agrement).toLocaleDateString("fr-FR")})` : ""}</div>}
-            {o.representant_nom && <div style={{ fontSize: 10.5, color: "var(--c-text-muted)" }}>Représentant légal : {o.representant_nom}{o.representant_fonction ? ` — ${o.representant_fonction}` : ""}</div>}
-            {(o.adresse_officielle || o.telephone_officiel || o.email_professionnel) && (
-              <div style={{ fontSize: 10.5, color: "var(--c-text-muted)" }}>{[o.adresse_officielle, o.telephone_officiel, o.email_professionnel].filter(Boolean).join(" · ")}</div>
-            )}
-            {o.etape_dossier_motif && <div style={{ fontSize: 10.5, color: "#B5451B", marginTop: 2 }}>Motif de l'étape : {o.etape_dossier_motif}</div>}
-            {o.motif_refus && <div style={{ fontSize: 10.5, color: "#B5451B", marginTop: 4 }}>Motif du compte : {o.motif_refus}</div>}
-
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
-              {ETAPES_INTERMEDIAIRES.filter(e => e !== o.etape_dossier).map(e => (
-                <button key={e} disabled={busyId === o.id} onClick={() => changerEtapeDossier(o, e)} style={{ fontSize: 10, padding: "4px 8px", borderRadius: 7, border: `1px solid ${ETAPE_DOSSIER_INFO[e].couleur}`, background: "var(--c-surface)", color: ETAPE_DOSSIER_INFO[e].couleur, fontWeight: 600, cursor: "pointer" }}>
-                  {ETAPE_DOSSIER_INFO[e].label}
-                </button>
-              ))}
-            </div>
-            <div style={{ fontSize: 10, color: "var(--c-text-muted)", marginTop: 6 }}>Documents et niveau de vérification détaillés : onglet « Vérification ».</div>
+            {o.numero_enregistrement && <div style={{ fontSize: 10.5, color: "var(--c-text-muted)" }}>N° enregistrement : {o.numero_enregistrement}</div>}
+            {o.motif_refus && <div style={{ fontSize: 10.5, color: "#B5451B", marginTop: 4 }}>Motif : {o.motif_refus}</div>}
             {isSuperAdmin && (
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
                 {o.statut !== "valide" && o.statut !== "bloque" && (
@@ -9947,26 +9720,17 @@ function App() {
   // contrairement au bénévole, une organisation doit se connecter sur chaque nouvel appareil.
   const [organisationStatut, setOrganisationStatut] = useState(null);
   const [organisationType, setOrganisationType] = useState(null);
-  const [organisationEtapeDossier, setOrganisationEtapeDossier] = useState(null);
-  const [organisationEtapeMotif, setOrganisationEtapeMotif] = useState(null);
   const [organisationChargement, setOrganisationChargement] = useState(true);
   useEffect(() => {
     if (citoyenSession === undefined) return; // session en cours de résolution
     if (!citoyenSession || !citoyenSession.user || !citoyenSession.user.email) {
-      setOrganisationStatut(null); setOrganisationType(null);
-      setOrganisationEtapeDossier(null); setOrganisationEtapeMotif(null);
-      setOrganisationChargement(false);
+      setOrganisationStatut(null); setOrganisationType(null); setOrganisationChargement(false);
       return;
     }
-    supabase.from("organisations").select("statut, type, etape_dossier, etape_dossier_motif").eq("email", citoyenSession.user.email).eq("is_deleted", false).order("created_at", { ascending: false }).limit(1)
+    supabase.from("organisations").select("statut, type").eq("email", citoyenSession.user.email).eq("is_deleted", false).order("created_at", { ascending: false }).limit(1)
       .then(({ data }) => {
-        if (data && data.length > 0) {
-          setOrganisationStatut(data[0].statut); setOrganisationType(data[0].type);
-          setOrganisationEtapeDossier(data[0].etape_dossier); setOrganisationEtapeMotif(data[0].etape_dossier_motif);
-        } else if (data) {
-          setOrganisationStatut(null); setOrganisationType(null);
-          setOrganisationEtapeDossier(null); setOrganisationEtapeMotif(null);
-        }
+        if (data && data.length > 0) { setOrganisationStatut(data[0].statut); setOrganisationType(data[0].type); }
+        else if (data) { setOrganisationStatut(null); setOrganisationType(null); }
         setOrganisationChargement(false);
       });
   }, [citoyenSession]);
@@ -10513,7 +10277,7 @@ function App() {
           <GroupesTerrain onBack={() => setTab("accueil")} estBenevoleValide={estBenevoleValide} />
         ) : (
           <div key={tab} className="pace-fade-in">
-            {tab === "accueil" && <Accueil signalements={signalements.filter(s => s.device_id === DEVICE_ID)} arbres={arbres.filter(a => a.device_id === DEVICE_ID)} notifState={notifState} onEnableNotif={enableNotif} onOpenAdmin={() => setShowAdmin(true)} actualites={actualites} onNavigate={setTab} lang={lang} estBenevoleValide={estBenevoleValide} benevoleStatut={benevoleStatut} onBenevoleInscrit={() => { setBenevoleStatut("en_attente"); try { localStorage.setItem("pace-benevole-statut", "en_attente"); } catch (e) {} }} estOrganisationValidee={estOrganisationValidee} organisationStatut={organisationStatut} organisationEtapeDossier={organisationEtapeDossier} organisationEtapeMotif={organisationEtapeMotif} onBasculerStatutSignalement={citoyenBasculerStatutSignalement} />}
+            {tab === "accueil" && <Accueil signalements={signalements.filter(s => s.device_id === DEVICE_ID)} arbres={arbres.filter(a => a.device_id === DEVICE_ID)} notifState={notifState} onEnableNotif={enableNotif} onOpenAdmin={() => setShowAdmin(true)} actualites={actualites} onNavigate={setTab} lang={lang} estBenevoleValide={estBenevoleValide} benevoleStatut={benevoleStatut} onBenevoleInscrit={() => { setBenevoleStatut("en_attente"); try { localStorage.setItem("pace-benevole-statut", "en_attente"); } catch (e) {} }} estOrganisationValidee={estOrganisationValidee} organisationStatut={organisationStatut} onBasculerStatutSignalement={citoyenBasculerStatutSignalement} />}
             {tab === "carte" && accesEtendu && <Carte signalements={signalements} arbres={arbres} observations={observations} onAddSignalement={addSignalement} onAddArbre={addArbre} onAddObservation={addObservation} online={online} pendingQueueCount={pendingQueueCount} onFlushQueue={flushPendingQueue} lang={lang} coordFormat={coordFormat} />}
             {tab === "signaler" && accesEtendu && <Signaler onSubmit={addSignalement} lang={lang} coordFormat={coordFormat} />}
             {tab === "arbre" && accesEtendu && <MonArbre arbres={arbres.filter(a => a.device_id === DEVICE_ID)} suivis={suivis} onAdd={addArbre} onAddSuivi={addSuivi} lang={lang} coordFormat={coordFormat} />}
