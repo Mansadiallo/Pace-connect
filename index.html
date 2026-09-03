@@ -2617,7 +2617,7 @@ function Accueil({ signalements, arbres, notifState, onEnableNotif, onOpenAdmin,
 const ENV_ICON_MAP = { IconTrash, IconDroplet, IconTree, IconFlame, IconPick, IconAlert, IconPaw, IconFish, IconWind, IconLayers, IconWaves, IconFlask, IconHome, IconSun, IconSprout, IconGlobe };
 function envIcon(nom) { return ENV_ICON_MAP[nom] || IconAlert; }
 
-function Signaler({ onSubmit, lang, coordFormat }) {
+function Signaler({ onSubmit, lang, coordFormat, positionSecours }) {
   const [step, setStep] = useState(1); // 1 = défi, 2 = problème (mode dynamique uniquement), 3 = détails
   const [defiChoisi, setDefiChoisi] = useState(null);
   const [categorie, setCategorie] = useState(null);
@@ -2664,17 +2664,23 @@ function Signaler({ onSubmit, lang, coordFormat }) {
     };
     // Priorité au relevé GPS visible dans le formulaire (widget LocationPrecision), que
     // l'utilisateur a pu vérifier avant l'envoi. On ne retente un relevé "à l'aveugle" que
-    // si ce widget n'a encore rien capté (ex. permission accordée tardivement).
+    // si ce widget n'a encore rien capté (ex. permission accordée tardivement). En dernier
+    // recours, on utilise la position déjà connue depuis l'ouverture de l'app (positionSecours)
+    // plutôt qu'un point par défaut générique au centre de l'Afrique, qui ne correspond à
+    // l'emplacement réel de personne.
+    const repli = positionSecours && positionSecours.lat != null
+      ? [positionSecours.lat, positionSecours.lng]
+      : AFRICA_CENTER;
     if (gpsFix && gpsFix.lat != null && gpsFix.lng != null) {
       finalize(gpsFix.lat, gpsFix.lng);
     } else if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => finalize(pos.coords.latitude, pos.coords.longitude),
-        () => finalize(AFRICA_CENTER[0], AFRICA_CENTER[1]),
+        () => finalize(repli[0], repli[1]),
         { timeout: 6000, enableHighAccuracy: true }
       );
     } else {
-      finalize(AFRICA_CENTER[0], AFRICA_CENTER[1]);
+      finalize(repli[0], repli[1]);
     }
   }
 
@@ -4279,7 +4285,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
 
 const ETAT_SUIVI = { vivant: { label: "En bonne santé", color: "var(--c-accent)" }, stresse: { label: "En difficulté", color: "var(--c-warning)" }, mort: { label: "Mort", color: "#B5451B" } };
 
-function MonArbre({ arbres, suivis, onAdd, onAddSuivi, lang, coordFormat }) {
+function MonArbre({ arbres, suivis, onAdd, onAddSuivi, lang, coordFormat, positionSecours }) {
   const [showForm, setShowForm] = useState(false);
   const [nom, setNom] = useState("");
   const [photo, setPhoto] = useState(null);
@@ -4292,20 +4298,20 @@ function MonArbre({ arbres, suivis, onAdd, onAddSuivi, lang, coordFormat }) {
       onAdd({ nom, photo, lat, lng });
       setNom(""); setPhoto(null); setShowForm(false); setGpsFix(null);
     };
+    const repli = positionSecours && positionSecours.lat != null
+      ? [positionSecours.lat, positionSecours.lng]
+      : AFRICA_CENTER;
     if (gpsFix && gpsFix.lat != null && gpsFix.lng != null) {
       finalize(gpsFix.lat, gpsFix.lng);
     } else if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => finalize(pos.coords.latitude, pos.coords.longitude),
-        () => finalize(AFRICA_CENTER[0], AFRICA_CENTER[1]),
+        () => finalize(repli[0], repli[1]),
         { timeout: 6000, enableHighAccuracy: true }
       );
     } else {
-      finalize(AFRICA_CENTER[0], AFRICA_CENTER[1]);
+      finalize(repli[0], repli[1]);
     }
-  }
-
-  function growth(a) {
     const days = (Date.now() - a.plantedAt) / 86400000;
     return Math.min(100, Math.round((days / 180) * 100));
   }
@@ -4727,6 +4733,39 @@ function OrganisationCard({ lang, organisationStatut }) {
   const [oublieBusy, setOublieBusy] = useState(false);
   const [oublieMessage, setOublieMessage] = useState("");
 
+  // ===== Version du formulaire ("simple" ou "avancee") =====
+  // Pilotée depuis le Centre de contrôle PACE (module Formulaires), sans déploiement : ce
+  // formulaire se contente de lire quelle version est active et d'afficher les champs
+  // correspondants. Par défaut "simple" tant que la config n'a pas encore été chargée, pour ne
+  // jamais bloquer un visiteur sur un formulaire vide le temps du chargement.
+  const [versionFormulaire, setVersionFormulaire] = useState("simple");
+  useEffect(() => {
+    supabase.from("pace_config_formulaires").select("version_active").eq("formulaire", "inscription_organisation").maybeSingle()
+      .then(({ data }) => { if (data && data.version_active) setVersionFormulaire(data.version_active); });
+  }, []);
+
+  // Champs supplémentaires exigés uniquement par la version "avancee" (voir handle_new_organisation_user)
+  const [typeOng, setTypeOng] = useState("");
+  const [numeroAgrement, setNumeroAgrement] = useState("");
+  const [dateDelivranceAgrement, setDateDelivranceAgrement] = useState("");
+  const [dateExpirationAgrement, setDateExpirationAgrement] = useState("");
+  const [autoriteDelivrance, setAutoriteDelivrance] = useState("");
+  const [representantNom, setRepresentantNom] = useState("");
+  const [representantFonction, setRepresentantFonction] = useState("");
+  const [adresseOfficielle, setAdresseOfficielle] = useState("");
+  const [telephoneOfficiel, setTelephoneOfficiel] = useState("");
+  const [emailProfessionnel, setEmailProfessionnel] = useState("");
+  const [siteWeb, setSiteWeb] = useState("");
+  const [docAgrement, setDocAgrement] = useState(null); // data URL en attente d'upload
+  const [docStatuts, setDocStatuts] = useState(null);
+
+  function lireFichierEnDataUrl(fichier, onDone) {
+    if (!fichier) return;
+    const reader = new FileReader();
+    reader.onload = () => onDone(reader.result);
+    reader.readAsDataURL(fichier);
+  }
+
   useEffect(() => {
     supabase.from("env_defis").select("id, nom").eq("statut", "publie").order("ordre", { ascending: true })
       .then(({ data }) => setDefisDisponibles(data || []));
@@ -4745,6 +4784,25 @@ function OrganisationCard({ lang, organisationStatut }) {
     if (!password || password.length < 8) { setErreur("Le mot de passe doit contenir au moins 8 caractères."); return; }
     if (password !== confirmPassword) { setErreur("Les deux mots de passe ne correspondent pas."); return; }
     if (defisChoisis.length === 0) { setErreur("Choisis au moins un défi environnemental."); return; }
+    // Validations supplémentaires propres à la version "avancee" — en miroir de ce que le
+    // déclencheur serveur exige réellement quand cette version est active (voir
+    // handle_new_organisation_user), pour donner un message clair avant l'envoi plutôt que de
+    // laisser échouer la création du compte.
+    if (versionFormulaire === "avancee") {
+      if (type === "ong") {
+        if (!typeOng) { setErreur("Le type d'ONG (nationale, étrangère ou autre) est requis."); return; }
+        if (!numeroAgrement.trim()) { setErreur("Le numéro de l'agrément ou de l'acte légal est requis."); return; }
+        if (!dateDelivranceAgrement) { setErreur("La date de délivrance de l'agrément est requise."); return; }
+        if (!autoriteDelivrance.trim()) { setErreur("L'autorité ayant délivré l'agrément est requise."); return; }
+        if (!representantNom.trim() || !representantFonction.trim()) { setErreur("L'identité et la fonction du représentant légal sont requises."); return; }
+        if (!docAgrement) { setErreur("Le document de l'acte d'agrément est obligatoire."); return; }
+        if (!docStatuts) { setErreur("Le document des statuts de l'organisation est obligatoire."); return; }
+      }
+      if (!adresseOfficielle.trim() || !telephoneOfficiel.trim() || !emailProfessionnel.trim()) {
+        setErreur("L'adresse, le téléphone et l'e-mail professionnel officiels sont requis.");
+        return;
+      }
+    }
 
     setBusy(true);
     // Vérification préalable du code AVANT toute tentative de création de compte : GoTrue ne
@@ -4760,6 +4818,27 @@ function OrganisationCard({ lang, organisationStatut }) {
     const { data: dispo, error: errCode } = await supabase.rpc("organisation_code_disponible", { p_code: codeNormalise });
     if (errCode) { setBusy(false); setErreur("Impossible de vérifier le code pour le moment. Vérifie ta connexion et réessaie."); return; }
     if (dispo === false) { setBusy(false); setErreur("Ce code d'inscription est déjà utilisé par une autre organisation. Choisis-en un autre."); return; }
+
+    // Les documents (uniquement en version "avancee") sont uploadés vers le stockage AVANT la
+    // création du compte : le déclencheur serveur ne fait qu'enregistrer des URLs, il ne gère pas
+    // lui-même l'upload de fichiers.
+    let documents = [];
+    if (versionFormulaire === "avancee" && type === "ong") {
+      const [urlAgrement, urlStatuts] = await Promise.all([
+        uploadPhotoGeneric(docAgrement, "org-documents"),
+        uploadPhotoGeneric(docStatuts, "org-documents"),
+      ]);
+      if (!urlAgrement || !urlStatuts) {
+        setBusy(false);
+        setErreur("Échec de l'envoi d'un des documents. Vérifie ta connexion et réessaie.");
+        return;
+      }
+      documents = [
+        { type: "Récépissé / agrément officiel", url: urlAgrement },
+        { type: "Statuts / enregistrement légal", url: urlStatuts },
+      ];
+    }
+
     // Le compte Auth et la ligne "organisations" sont créés dans LA MÊME opération côté serveur
     // (déclencheur sur auth.users) plutôt qu'en deux appels séparés : avec deux appels, un code
     // déjà pris faisait échouer le 2e (l'insert organisations) alors que le 1er (auth.signUp)
@@ -4773,6 +4852,16 @@ function OrganisationCard({ lang, organisationStatut }) {
         type_compte: "organisation", nom_organisation: nom.trim(), nom: nom.trim(), type, pays: pays || null, ville: ville || null,
         description: description.trim() || null, numero_enregistrement: numeroEnregistrement.trim() || null,
         code_inscription: codeNormalise, defis: defisChoisis,
+        // Champs additionnels de la version "avancee" : envoyés systématiquement (vides si non
+        // applicables) — le déclencheur serveur ne les exploite de toute façon que si cette
+        // version est active au moment de l'inscription.
+        type_ong: typeOng || null, numero_agrement: numeroAgrement.trim() || null,
+        date_delivrance_agrement: dateDelivranceAgrement || null, date_expiration_agrement: dateExpirationAgrement || null,
+        autorite_delivrance: autoriteDelivrance.trim() || null,
+        representant_nom: representantNom.trim() || null, representant_fonction: representantFonction.trim() || null,
+        adresse_officielle: adresseOfficielle.trim() || null, telephone_officiel: telephoneOfficiel.trim() || null,
+        email_professionnel: emailProfessionnel.trim() || null, site_web: siteWeb.trim() || null,
+        documents,
       } },
     });
     setBusy(false);
@@ -4884,6 +4973,56 @@ function OrganisationCard({ lang, organisationStatut }) {
           <textarea value={description} onChange={e => setDescription(e.target.value)} rows={2} placeholder="Brève description (optionnel)"
             style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 10, boxSizing: "border-box", fontFamily: "Work Sans, sans-serif", resize: "none" }} />
 
+          {versionFormulaire === "avancee" && (
+            <div style={{ background: "var(--c-surface-soft)", borderRadius: 12, padding: 12, marginBottom: 10 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--c-accent-dark)", marginBottom: 8 }}>Vérification de l'organisation</div>
+
+              {type === "ong" && (
+                <>
+                  <select required value={typeOng} onChange={e => setTypeOng(e.target.value)}
+                    style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }}>
+                    <option value="" disabled>Type d'ONG</option>
+                    <option value="nationale">ONG nationale</option>
+                    <option value="etrangere">ONG étrangère</option>
+                    <option value="autre">Autre</option>
+                  </select>
+                  <input required value={numeroAgrement} onChange={e => setNumeroAgrement(e.target.value)} placeholder="Numéro de l'agrément / acte légal"
+                    style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
+                  <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                    <input required type="date" value={dateDelivranceAgrement} onChange={e => setDateDelivranceAgrement(e.target.value)}
+                      style={{ flex: 1, padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, boxSizing: "border-box" }} />
+                    <input type="date" value={dateExpirationAgrement} onChange={e => setDateExpirationAgrement(e.target.value)} placeholder="Expiration (optionnel)"
+                      style={{ flex: 1, padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, boxSizing: "border-box" }} />
+                  </div>
+                  <input required value={autoriteDelivrance} onChange={e => setAutoriteDelivrance(e.target.value)} placeholder="Autorité ayant délivré l'agrément"
+                    style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
+                  <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                    <input required value={representantNom} onChange={e => setRepresentantNom(e.target.value)} placeholder="Nom du représentant légal"
+                      style={{ flex: 1, padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, boxSizing: "border-box" }} />
+                    <input required value={representantFonction} onChange={e => setRepresentantFonction(e.target.value)} placeholder="Fonction"
+                      style={{ flex: 1, padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, boxSizing: "border-box" }} />
+                  </div>
+
+                  <div style={{ fontSize: 11, color: "var(--c-text-secondary)", marginBottom: 4 }}>Récépissé / agrément officiel (PDF ou image) *</div>
+                  <input required type="file" accept="application/pdf,image/*" onChange={e => lireFichierEnDataUrl(e.target.files[0], setDocAgrement)}
+                    style={{ width: "100%", fontSize: 12, marginBottom: 8 }} />
+                  <div style={{ fontSize: 11, color: "var(--c-text-secondary)", marginBottom: 4 }}>Statuts / enregistrement légal (PDF ou image) *</div>
+                  <input required type="file" accept="application/pdf,image/*" onChange={e => lireFichierEnDataUrl(e.target.files[0], setDocStatuts)}
+                    style={{ width: "100%", fontSize: 12, marginBottom: 8 }} />
+                </>
+              )}
+
+              <input required value={adresseOfficielle} onChange={e => setAdresseOfficielle(e.target.value)} placeholder="Adresse officielle"
+                style={{ width: "100%", padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }} />
+              <div style={{ display: "flex", gap: 8 }}>
+                <input required value={telephoneOfficiel} onChange={e => setTelephoneOfficiel(e.target.value)} placeholder="Téléphone officiel"
+                  style={{ flex: 1, padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, boxSizing: "border-box" }} />
+                <input required type="email" value={emailProfessionnel} onChange={e => setEmailProfessionnel(e.target.value)} placeholder="E-mail professionnel"
+                  style={{ flex: 1, padding: 9, borderRadius: 10, border: "1px solid var(--c-border)", fontSize: 13, boxSizing: "border-box" }} />
+              </div>
+            </div>
+          )}
+
           <div style={{ fontSize: 12, fontWeight: 600, color: "var(--c-text)", marginBottom: 6 }}>Domaine(s) d'activité *</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
             {defisDisponibles.map(d => {
@@ -4950,7 +5089,7 @@ function BenevoleAccesBloque({ statut }) {
   );
 }
 
-function Biodiversite({ observations, onAdd, onBack, lang, coordFormat }) {
+function Biodiversite({ observations, onAdd, onBack, lang, coordFormat, positionSecours }) {
   const [showForm, setShowForm] = useState(false);
   const [espece, setEspece] = useState("");
   const [description, setDescription] = useState("");
@@ -4966,15 +5105,18 @@ function Biodiversite({ observations, onAdd, onBack, lang, coordFormat }) {
         setBusy(false); setEspece(""); setDescription(""); setPhoto(null); setShowForm(false); setGpsFix(null);
       });
     };
+    const repli = positionSecours && positionSecours.lat != null
+      ? [positionSecours.lat, positionSecours.lng]
+      : AFRICA_CENTER;
     if (gpsFix && gpsFix.lat != null && gpsFix.lng != null) {
       finalize(gpsFix.lat, gpsFix.lng);
     } else if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => finalize(pos.coords.latitude, pos.coords.longitude),
-        () => finalize(AFRICA_CENTER[0], AFRICA_CENTER[1]),
+        () => finalize(repli[0], repli[1]),
         { timeout: 6000, enableHighAccuracy: true }
       );
-    } else finalize(AFRICA_CENTER[0], AFRICA_CENTER[1]);
+    } else finalize(repli[0], repli[1]);
   }
 
   return (
@@ -7094,7 +7236,7 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
       </div>
 
       <div style={{ display: "flex", gap: 6, marginBottom: 18, overflowX: "auto" }}>
-        {[["signalements", "Signalements", IconAlert], ["arbres", "Arbres", IconTree], ["actualites", "Actualités", IconNewspaper], ["evenements", "Événements", IconCalendar], ["benevoles", "Bénévoles", IconUsers], ["organisations", "Organisations", IconShield], ["publications", "Vérification", IconCheck], ["historique", "Historique", IconClock], ["securite", "Sécurité", IconShield], ["contenu_env", "Taxonomie", IconLayers], ["rapports", "Rapports", IconDownload], ["suppressions", "Suppressions", IconUserCircle]].map(([id, label, Ic]) => (
+        {[["signalements", "Signalements", IconAlert], ["arbres", "Arbres", IconTree], ["actualites", "Actualités", IconNewspaper], ["evenements", "Événements", IconCalendar], ["benevoles", "Bénévoles", IconUsers], ["organisations", "Organisations", IconShield], ["publications", "Vérification", IconCheck], ["historique", "Historique", IconClock], ["securite", "Sécurité", IconShield], ["contenu_env", "Taxonomie", IconLayers], ["rapports", "Rapports", IconDownload], ["suppressions", "Suppressions", IconUserCircle], ["formulaires", "Formulaires", IconSettings]].map(([id, label, Ic]) => (
           <button key={id} onClick={() => setPanel(id)} style={{
             display: "flex", alignItems: "center", gap: 5, padding: "7px 12px", borderRadius: 20, fontSize: 11.5, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap",
             border: panel === id ? "1px solid var(--c-accent-dark)" : "1px solid var(--c-border)",
@@ -7289,6 +7431,7 @@ function AdminSpace({ signalements: signalementsProp, arbres, onUpdateStatut, on
       {panel === "publications" && <AdminVerification isSuperAdmin={isSuperAdmin} adminEmail={session.user.email} />}
       {panel === "rapports" && <AdminRapports signalements={signalements} arbres={arbres} isSuperAdmin={isSuperAdmin} centreVerrouille={centreVerrouille} onToggleCentre={toggleCentreVerrouille} />}
       {panel === "suppressions" && <AdminSuppressions />}
+      {panel === "formulaires" && <AdminFormulaires isSuperAdmin={isSuperAdmin} adminEmail={session.user.email} />}
 
       <button onClick={onExit} style={{ marginTop: 18, width: "100%", background: "none", border: "none", color: "var(--c-text-muted)", fontSize: 12.5, cursor: "pointer", padding: 8 }}>← Retour à l'app</button>
     </Screen>
@@ -9235,7 +9378,94 @@ function AdminOrganisations({ isSuperAdmin, adminEmail }) {
   );
 }
 
-const ONBOARDING_SLIDES = [
+// Module "Formulaires" du Centre de contrôle PACE : permet de choisir, pour chaque formulaire
+// versionné (pour l'instant : inscription organisation), quelle version est active — sans jamais
+// avoir à modifier le code. La bascule écrit dans pace_config_formulaires, lue par le déclencheur
+// serveur handle_new_organisation_user à chaque inscription. Conçu pour accueillir d'autres
+// formulaires versionnés à l'avenir (même mécanique, une ligne de plus dans la table).
+const FORMULAIRES_VERSIONNES = [
+  {
+    id: "inscription_organisation",
+    label: "Inscription organisation",
+    description: "Formulaire par lequel une ONG ou une administration crée son compte PACE Connect.",
+    versions: [
+      { id: "simple", label: "Simple", detail: "Nom, type, pays, ville, description, numéro d'enregistrement (optionnel), domaines d'activité. Validation immédiate par l'équipe PACE, sans pièce justificative." },
+      { id: "avancee", label: "Avancée", detail: "Ajoute : agrément officiel (numéro, date, autorité), représentant légal, adresse/téléphone/e-mail professionnels, et deux documents obligatoires pour une ONG (récépissé d'agrément, statuts). Pensée pour un niveau de vérification plus poussé." },
+    ],
+  },
+];
+
+function AdminFormulaires({ isSuperAdmin, adminEmail }) {
+  const [config, setConfig] = useState(null); // { [formulaire]: version_active }
+  const [busyId, setBusyId] = useState(null);
+  const [erreur, setErreur] = useState("");
+
+  async function charger() {
+    const { data } = await supabase.from("pace_config_formulaires").select("formulaire, version_active");
+    const idx = {};
+    (data || []).forEach(r => { idx[r.formulaire] = r.version_active; });
+    setConfig(idx);
+  }
+  useEffect(() => { charger(); }, []);
+
+  async function activerVersion(formulaireId, versionId) {
+    setErreur("");
+    setBusyId(formulaireId);
+    const { error } = await supabase.from("pace_config_formulaires")
+      .update({ version_active: versionId, updated_at: new Date().toISOString(), updated_par: adminEmail })
+      .eq("formulaire", formulaireId);
+    setBusyId(null);
+    if (error) { setErreur("Action refusée par le serveur (réservée au super-admin)."); return; }
+    logAudit("formulaire_version_activee", "pace_config_formulaires", formulaireId, null, { version: versionId });
+    charger();
+  }
+
+  if (config === null) return <div style={{ textAlign: "center", color: "var(--c-text-muted)", fontSize: 13 }}>Chargement…</div>;
+
+  return (
+    <div>
+      <div style={{ fontSize: 11.5, color: "var(--c-text-muted)", lineHeight: 1.5, marginBottom: 14 }}>
+        Choisis, pour chaque formulaire versionné, laquelle de ses versions est actuellement utilisée par les utilisateurs de PACE Connect.
+        {!isSuperAdmin && " La bascule est réservée au super-admin."}
+      </div>
+      {erreur && <div role="alert" style={{ fontSize: 12.5, color: "#B5451B", background: "var(--c-danger-border-soft)", borderRadius: 10, padding: "9px 12px", marginBottom: 12 }}>{erreur}</div>}
+
+      {FORMULAIRES_VERSIONNES.map(f => {
+        const versionActive = config[f.id] || "simple";
+        return (
+          <div key={f.id} style={{ background: "var(--c-surface)", borderRadius: 14, padding: 14, border: "1px solid var(--c-border)", marginBottom: 12 }}>
+            <div style={{ fontFamily: "Fraunces, serif", fontSize: 15, fontWeight: 600, color: "var(--c-accent-dark)", marginBottom: 3 }}>{f.label}</div>
+            <div style={{ fontSize: 12, color: "var(--c-text-secondary)", marginBottom: 12 }}>{f.description}</div>
+            {f.versions.map(v => (
+              <div key={v.id} style={{
+                display: "flex", alignItems: "flex-start", gap: 10, padding: "10px 12px", borderRadius: 12, marginBottom: 8,
+                border: versionActive === v.id ? "1.5px solid var(--c-accent)" : "1px solid var(--c-border)",
+                background: versionActive === v.id ? "var(--c-surface-soft)" : "var(--c-surface-dashed)" }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }}>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: versionActive === v.id ? "var(--c-accent)" : "var(--c-text)" }}>{v.label}</span>
+                    {versionActive === v.id && (
+                      <span style={{ fontSize: 10, fontWeight: 700, color: "#fff", background: "var(--c-accent)", borderRadius: 999, padding: "2px 8px" }}>Active</span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "var(--c-text-muted)", lineHeight: 1.4 }}>{v.detail}</div>
+                </div>
+                {versionActive !== v.id && (
+                  <button
+                    onClick={() => { if (isSuperAdmin && confirm(`Activer la version "${v.label}" pour "${f.label}" ? Elle s'appliquera immédiatement à toute nouvelle inscription.`)) activerVersion(f.id, v.id); }}
+                    disabled={!isSuperAdmin || busyId === f.id}
+                    style={{ padding: "7px 12px", borderRadius: 10, border: "none", background: isSuperAdmin ? "var(--c-accent-dark)" : "var(--c-border)", color: "#fff", fontWeight: 600, fontSize: 11.5, cursor: isSuperAdmin ? "pointer" : "not-allowed", whiteSpace: "nowrap", flexShrink: 0 }}>
+                    {busyId === f.id ? "…" : "Activer"}
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
   { icon: IconAlert, title: "Signale un problème", text: "Décharges, pollution, déforestation... prends une photo, ta position s'ajoute automatiquement." },
   { icon: IconMapPin, title: "Vois la carte communautaire", text: "Les signalements validés et les arbres plantés par tout le monde, en direct." },
   { icon: IconTree, title: "Plante et suis tes arbres", text: "Enregistre chaque arbre planté et suis sa croissance dans le temps." },
@@ -9656,6 +9886,69 @@ function App() {
   const [pendingQueueCount, setPendingQueueCount] = useState(() => loadPendingQueue().length);
   const flushInProgressRef = useRef(false);
 
+  // ===== Position de connexion =====
+  // Dès l'ouverture de l'app, la position GPS de l'appareil est capturée en arrière-plan, SANS
+  // dépendre du réseau (le GPS d'un téléphone fonctionne hors-ligne — seule la connexion à
+  // Supabase, plus bas, en a besoin). Cette position sert à deux choses :
+  //  1. Repli fiable pour les formulaires de terrain (Signaler, Mon Arbre, Biodiversité) si leur
+  //     propre relevé GPS échoue au moment de l'envoi (permission accordée tardivement, mauvais
+  //     signal ponctuel...) — au lieu de retomber sur un point par défaut au centre de l'Afrique.
+  //  2. Un "pointage" de présence journalisé côté serveur (table positions_connexion, à créer côté
+  //     Supabase), pour qu'une organisation puisse savoir où se trouvent ses bénévoles sur le
+  //     terrain. Comme toute donnée de terrain, il passe par la file d'attente hors-ligne s'il n'y
+  //     a pas de réseau au moment de la connexion, et repart automatiquement au retour du réseau.
+  const [positionConnexion, setPositionConnexion] = useState(null);
+
+  async function enregistrerPositionConnexion(fix) {
+    // Ne journalise pas plus d'une fois toutes les 30 minutes par appareil : la position sert
+    // surtout à savoir où se trouve le bénévole "en ce moment", pas à tracer un historique complet
+    // minute par minute, et ça évite de saturer la file d'attente si l'app est réouverte souvent.
+    const SEUIL_MS = 30 * 60 * 1000;
+    let derniere = 0;
+    try { derniere = Number(localStorage.getItem("pace-derniere-position-connexion") || 0); } catch (e) {}
+    if (Date.now() - derniere < SEUIL_MS) return;
+    try { localStorage.setItem("pace-derniere-position-connexion", String(Date.now())); } catch (e) {}
+
+    const benevole = getBenevoleInfo();
+    const estOrganisation = !!(citoyenSession && citoyenSession.user && citoyenSession.user.user_metadata && citoyenSession.user.user_metadata.type_compte === "organisation");
+    const payload = {
+      lat: fix.lat, lng: fix.lng, precision: fix.precision != null ? Math.round(fix.precision) : null,
+      device_id: DEVICE_ID,
+      benevole_id: benevole ? benevole.id : null,
+      user_id: (citoyenSession && citoyenSession.user) ? citoyenSession.user.id : null,
+      type_compte: estOrganisation ? "organisation" : (citoyenSession && citoyenSession.user ? "citoyen" : (benevole ? "benevole" : "anonyme")),
+    };
+    if (!navigator.onLine) {
+      enqueuePendingAction("position_connexion", payload);
+      setPendingQueueCount(loadPendingQueue().length);
+      return;
+    }
+    try {
+      const { error } = await supabase.from("positions_connexion").insert(payload);
+      if (error) throw error;
+    } catch (e) {
+      // Best-effort : un pointage manqué (réseau instable, table pas encore créée côté Supabase...)
+      // ne doit jamais bloquer ni perturber l'utilisation de l'app — on le met simplement en file
+      // d'attente pour réessayer plus tard, sans alerte visible (contrairement à un signalement).
+      enqueuePendingAction("position_connexion", payload);
+      setPendingQueueCount(loadPendingQueue().length);
+    }
+  }
+
+  useEffect(() => {
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const fix = { lat: pos.coords.latitude, lng: pos.coords.longitude, precision: pos.coords.accuracy };
+        setPositionConnexion(fix);
+        enregistrerPositionConnexion(fix);
+      },
+      () => {}, // Permission refusée ou échec : la position de connexion reste simplement indisponible, sans bloquer l'app.
+      { timeout: 8000, enableHighAccuracy: false, maximumAge: 5 * 60 * 1000 }
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [citoyenSession]);
+
   useEffect(() => {
     const goOnline = () => { setOnline(true); flushPendingQueue(); };
     const goOffline = () => setOnline(false);
@@ -10006,6 +10299,11 @@ function App() {
           if (item.type === "signalement") await addSignalement(item.payload, { isReplay: true, tempId: item.id });
           else if (item.type === "arbre") await addArbre(item.payload, { isReplay: true, tempId: item.id });
           else if (item.type === "observation") await addObservation(item.payload, { isReplay: true, tempId: item.id });
+          else if (item.type === "position_connexion") {
+            const { error } = await supabase.from("positions_connexion").insert(item.payload);
+            if (error) throw error;
+            dequeuePendingAction(item.id);
+          }
           else dequeuePendingAction(item.id);
         } catch (e) {
           // Un échec sur un élément (réseau instable ou donnée rejetée par le serveur) ne doit
@@ -10094,7 +10392,7 @@ function App() {
             <IconClock size={15} /> Vérification de l'accès…
           </div>
         ) : tab === "biodiversite" && accesEtendu ? (
-          <Biodiversite observations={observations} onAdd={addObservation} onBack={() => setTab("accueil")} lang={lang} coordFormat={coordFormat} />
+          <Biodiversite observations={observations} onAdd={addObservation} onBack={() => setTab("accueil")} lang={lang} coordFormat={coordFormat} positionSecours={positionConnexion} />
         ) : tab === "assistant" && accesEtendu ? (
           <AssistantIA onBack={() => setTab("accueil")} signalements={signalements} arbres={arbres} observations={observations} actualites={actualites} />
         ) : tab === "espace_org" && estOrganisationValidee ? (
@@ -10107,8 +10405,8 @@ function App() {
           <div key={tab} className="pace-fade-in">
             {tab === "accueil" && <Accueil signalements={signalements.filter(s => s.device_id === DEVICE_ID)} arbres={arbres.filter(a => a.device_id === DEVICE_ID)} notifState={notifState} onEnableNotif={enableNotif} onOpenAdmin={() => setShowAdmin(true)} actualites={actualites} onNavigate={setTab} lang={lang} estBenevoleValide={estBenevoleValide} benevoleStatut={benevoleStatut} onBenevoleInscrit={() => { setBenevoleStatut("en_attente"); try { localStorage.setItem("pace-benevole-statut", "en_attente"); } catch (e) {} }} estOrganisationValidee={estOrganisationValidee} organisationStatut={organisationStatut} onBasculerStatutSignalement={citoyenBasculerStatutSignalement} />}
             {tab === "carte" && accesEtendu && <Carte signalements={signalements} arbres={arbres} observations={observations} onAddSignalement={addSignalement} onAddArbre={addArbre} onAddObservation={addObservation} online={online} pendingQueueCount={pendingQueueCount} onFlushQueue={flushPendingQueue} lang={lang} coordFormat={coordFormat} />}
-            {tab === "signaler" && accesEtendu && <Signaler onSubmit={addSignalement} lang={lang} coordFormat={coordFormat} />}
-            {tab === "arbre" && accesEtendu && <MonArbre arbres={arbres.filter(a => a.device_id === DEVICE_ID)} suivis={suivis} onAdd={addArbre} onAddSuivi={addSuivi} lang={lang} coordFormat={coordFormat} />}
+            {tab === "signaler" && accesEtendu && <Signaler onSubmit={addSignalement} lang={lang} coordFormat={coordFormat} positionSecours={positionConnexion} />}
+            {tab === "arbre" && accesEtendu && <MonArbre arbres={arbres.filter(a => a.device_id === DEVICE_ID)} suivis={suivis} onAdd={addArbre} onAddSuivi={addSuivi} lang={lang} coordFormat={coordFormat} positionSecours={positionConnexion} />}
           </div>
         )}
 
