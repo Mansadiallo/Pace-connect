@@ -1605,10 +1605,15 @@ const TRANSLATIONS = {
     zones_enregistrees_local: "Zones enregistrées (local)",
     projets_suivi_admin: "Projets et suivi-évaluation : réservés au Centre de contrôle PACE, non affichés ici.",
     layer_arbres: "Arbres",
-    layer_signalements: "Signalements (autres)",
-    layer_dechets: "Déchets",
+    layer_signalements: "Autres atteintes environnementales",
+    layer_dechets: "Déchets et décharges",
     layer_pollution: "Pollution",
     layer_biodiversite: "Biodiversité",
+    layer_deforestation: "Déforestation",
+    layer_mine: "Exploitation minière",
+    layer_pollution_eau: "Pollution des cours d'eau",
+    layer_assechement: "Assèchement des points d'eau",
+    layer_deversement: "Déversements polluants",
     apercu_photo: "Aperçu",
     legend_toi: "Toi", legend_arbre_plante: "Arbre planté",
     gps_recherche_signal: "Recherche du signal GPS…", gps_precision_label: "Précision", gps_lat_label: "Lat", gps_lng_label: "Lng",
@@ -2836,8 +2841,11 @@ function Signaler({ onSubmit, lang, coordFormat }) {
 
 const AFRICA_CENTER = [7.1881, 21.0938]; // Centre géographique approximatif du continent africain
 
-function markerHtml(color, kind) {
+function markerHtml(color, kind, borderColor) {
   // kind: "pin" (signalement), "tree", ou "leaf" (biodiversité)
+  // borderColor (uniquement pour "pin") : distingue l'origine du signalement — bénévole,
+  // ONG ou administration publique — sans toucher à la couleur de remplissage, qui reste
+  // l'urgence (voir section 6 du cahier des charges : signalements distinguables par origine).
   if (kind === "tree") {
     return `<div style="width:30px;height:30px;border-radius:50%;background:#fff;border:2px solid ${color};display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,0,0,0.25)">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -2850,17 +2858,43 @@ function markerHtml(color, kind) {
         <path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.5-4.78 10-10 10z"/><path d="M2 21c0-3 1.85-5.36 5.08-6C9.5 14.52 12 13 13 12"/>
       </svg></div>`;
   }
-  return `<div style="width:30px;height:30px;border-radius:50% 50% 50% 0;background:${color};transform:rotate(-45deg);box-shadow:0 2px 6px rgba(0,0,0,0.25);border:2px solid #fff"></div>`;
+  return `<div style="width:30px;height:30px;border-radius:50% 50% 50% 0;background:${color};transform:rotate(-45deg);box-shadow:0 2px 6px rgba(0,0,0,0.25);border:3px solid ${borderColor || "#fff"}"></div>`;
 }
 
-// Regroupement des catégories de signalements en couches "Déchets" / "Pollution" /
-// "Signalements" — la base de données a une seule table `signalements` avec un
-// champ `categorie`, donc ces 3 couches filtrent la même source par catégorie
-// plutôt que de venir de 3 tables séparées.
+// Origine d'un signalement — bénévole, ONG, administration publique, ou citoyen (défaut,
+// sans marquage visuel particulier). "origineParGroupe" fait le lien groupe -> type
+// d'organisation, construit une seule fois (voir chargerOrigines dans Carte).
+const ORIGINE_COULEURS = { benevole: "#2E6B8A", ong: "#1F7A4D", administration: "#7A1F1F" };
+const ORIGINE_LABELS = { citoyen: "Citoyen", benevole: "Bénévole", ong: "ONG", administration: "Administration publique" };
+function origineSignalement(s, origineParGroupe) {
+  if (s.groupe_id && origineParGroupe[s.groupe_id]) return origineParGroupe[s.groupe_id] === "gouvernement" ? "administration" : "ong";
+  if (s.benevole_id || s.benevole_nom) return "benevole";
+  return "citoyen";
+}
+
+// Regroupement des catégories de signalements en 8 couches thématiques clairement
+// identifiables (déforestation, exploitation minière, pollution, déchets et décharges,
+// pollution des cours d'eau, assèchement des points d'eau, déversements polluants,
+// autres atteintes environnementales). La base garde une seule table `signalements`
+// avec un champ `categorie` : ces couches filtrent cette même source par catégorie
+// plutôt que de venir de tables séparées.
+const COUCHE_DEFORESTATION_CATEGORIES = ["deforestation"];
+const COUCHE_MINE_CATEGORIES = ["mine"];
 const COUCHE_DECHETS_CATEGORIES = ["decharge", "dechets_dangereux"];
-const COUCHE_POLLUTION_CATEGORIES = ["pollution", "deversement", "pollution_air"];
+const COUCHE_POLLUTION_CATEGORIES = ["pollution_air"];
+const COUCHE_POLLUTION_EAU_CATEGORIES = ["pollution", "eau_potable"];
+const COUCHE_ASSECHEMENT_CATEGORIES = ["assechement"];
+const COUCHE_DEVERSEMENT_CATEGORIES = ["deversement"];
+// "Autres atteintes environnementales" (couche "signalements") : feu, braconnage, pêche
+// illégale, extraction de sable, zones humides, construction illégale, espèce
+// envahissante, érosion, inondation — tout ce qui ne rentre dans aucune couche dédiée.
 function coucheDeCategorie(catId) {
+  if (COUCHE_DEFORESTATION_CATEGORIES.includes(catId)) return "deforestation";
+  if (COUCHE_MINE_CATEGORIES.includes(catId)) return "mine";
   if (COUCHE_DECHETS_CATEGORIES.includes(catId)) return "dechets";
+  if (COUCHE_POLLUTION_EAU_CATEGORIES.includes(catId)) return "pollution_eau";
+  if (COUCHE_ASSECHEMENT_CATEGORIES.includes(catId)) return "assechement";
+  if (COUCHE_DEVERSEMENT_CATEGORIES.includes(catId)) return "deversement";
   if (COUCHE_POLLUTION_CATEGORIES.includes(catId)) return "pollution";
   return "signalements";
 }
@@ -3126,6 +3160,16 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
   // qu'on peut activer par-dessus n'importe quel fond de carte.
   const [coucheOccupationSol, setCoucheOccupationSol] = useState(false);
   const [coucheHydrologie, setCoucheHydrologie] = useState(false);
+  // Origine des signalements (bénévole / ONG / administration publique) — chargé une seule
+  // fois : correspondance groupe de terrain -> type de l'organisation de rattachement.
+  const [origineParGroupe, setOrigineParGroupe] = useState({});
+  useEffect(() => {
+    supabase.from("gt_groupes").select("id, organisations(type)").then(({ data }) => {
+      const map = {};
+      (data || []).forEach(g => { if (g.organisations) map[g.id] = g.organisations.type; });
+      setOrigineParGroupe(map);
+    });
+  }, []);
   // Date de capture de l'imagerie satellite Esri visible au centre de la carte — Esri met à
   // jour ce fond par zones, sans cycle régulier (voir échange précédent). On interroge la
   // sous-couche "Citations" du service via l'opération identify pour l'afficher honnêtement,
@@ -3134,7 +3178,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
   const dateImagerieTimerRef = useRef(null);
 
   // Couches — toutes désactivées par défaut, seul le fond de carte est actif.
-  const [layersOn, setLayersOn] = useState({ arbres: true, signalements: true, dechets: true, pollution: true, biodiversite: true });
+  const [layersOn, setLayersOn] = useState({ arbres: true, signalements: true, dechets: true, pollution: true, biodiversite: true, deforestation: true, mine: true, pollution_eau: true, assechement: true, deversement: true });
   const [showLayers, setShowLayers] = useState(false);
 
   // Filtres intelligents combinables.
@@ -3144,7 +3188,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
   const [showFilters, setShowFilters] = useState(false);
   const filtresActifs = !!(filtreCategorie || filtreStatut || filtreDepuis);
 
-  const [visibleCount, setVisibleCount] = useState({ arbres: 0, dechets: 0, pollution: 0, signalements: 0, biodiversite: 0 });
+  const [visibleCount, setVisibleCount] = useState({ arbres: 0, dechets: 0, pollution: 0, signalements: 0, biodiversite: 0, deforestation: 0, mine: 0, pollution_eau: 0, assechement: 0, deversement: 0 });
 
   // Outils d'analyse géographique.
   const drawnItemsRef = useRef(null);
@@ -3746,7 +3790,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
         const d = analysisDataRef.current;
         const items = [];
         if (d.layersOn.arbres) (d.arbres || []).filter((a) => a.valide || a.device_id === DEVICE_ID).forEach((a) => { if (a.lat && a.lng && pointInPolygon([a.lat, a.lng], poly)) items.push({ type: "Arbre", nom: a.nom, date: a.date, lat: a.lat, lng: a.lng }); });
-        if (d.layersOn.signalements || d.layersOn.dechets || d.layersOn.pollution) {
+        if (["signalements", "dechets", "pollution", "deforestation", "mine", "pollution_eau", "assechement", "deversement"].some(c => d.layersOn[c])) {
           (d.signalements || []).filter((s) => s.valide || s.device_id === DEVICE_ID).forEach((s) => {
             const couche = coucheDeCategorie(s.categorie);
             if (!d.layersOn[couche]) return;
@@ -3789,7 +3833,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
   useEffect(() => {
     if (!layerRef.current) return;
     layerRef.current.clearLayers();
-    const counts = { arbres: 0, dechets: 0, pollution: 0, signalements: 0, biodiversite: 0 };
+    const counts = { arbres: 0, dechets: 0, pollution: 0, signalements: 0, biodiversite: 0, deforestation: 0, mine: 0, pollution_eau: 0, assechement: 0, deversement: 0 };
 
     if (layersOn.arbres) {
       (arbres || []).filter((a) => a.valide || a.device_id === DEVICE_ID).forEach((a) => {
@@ -3804,7 +3848,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
       });
     }
 
-    if (layersOn.dechets || layersOn.pollution || layersOn.signalements) {
+    if (COUCHES_SIGNALEMENT.some(c => layersOn[c])) {
       (signalements || []).filter((s) => s.valide || s.device_id === DEVICE_ID).forEach((s) => {
         const couche = coucheDeCategorie(s.categorie);
         if (!layersOn[couche]) return;
@@ -3814,13 +3858,15 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
         counts[couche]++;
         const u = URGENCE.find((x) => x.id === s.urgence);
         const color = u ? u.color : "#B5451B";
-        const icon = L.divIcon({ html: markerHtml(color, "pin"), className: "", iconSize: [30, 30], iconAnchor: [15, 30] });
+        const origine = origineSignalement(s, origineParGroupe);
+        const icon = L.divIcon({ html: markerHtml(color, "pin", ORIGINE_COULEURS[origine]), className: "", iconSize: [30, 30], iconAnchor: [15, 30] });
         const cat = categorieMeta(s.categorie);
         const photoHtml = mediaHtml(s.photo_url, 110);
         const pendingHtml = !s.valide ? `<div style="font-size:11px;color:#B5451B;margin-top:4px">⏳ ${t(lang, "en_attente_validation")}</div>` : "";
+        const origineHtml = origine !== "citoyen" ? `<div style="font-size:10.5px;color:${ORIGINE_COULEURS[origine]};font-weight:600;margin-top:2px">${ORIGINE_LABELS[origine]}</div>` : "";
         L.marker([s.lat, s.lng], { icon, opacity: s.valide ? 1 : 0.6 }).addTo(layerRef.current)
           .on("click", () => setSelected({ type: "signalement", data: s }))
-          .bindPopup(`<b>${escapeHtml(categorieLabel(lang, cat.id))}</b><br/>${s.date}${photoHtml}${pendingHtml}`);
+          .bindPopup(`<b>${escapeHtml(categorieLabel(lang, cat.id))}</b><br/>${s.date}${origineHtml}${photoHtml}${pendingHtml}`);
       });
     }
 
@@ -3838,7 +3884,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
     }
 
     setVisibleCount(counts);
-  }, [signalements, arbres, observations, layersOn, filtreCategorie, filtreStatut, filtreDepuis]);
+  }, [signalements, arbres, observations, layersOn, filtreCategorie, filtreStatut, filtreDepuis, origineParGroupe]);
 
   // Rendu des zones locales et des parcours enregistrés (7. interaction avec les données PACE Connect).
   useEffect(() => {
@@ -3861,14 +3907,20 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
     });
   }, [savedParcours, showParcoursPanel]);
 
-  const totalVisible = visibleCount.arbres + visibleCount.dechets + visibleCount.pollution + visibleCount.signalements + visibleCount.biodiversite;
-  const aucuneCoucheActive = !layersOn.arbres && !layersOn.signalements && !layersOn.dechets && !layersOn.pollution && !layersOn.biodiversite;
+  const totalVisible = visibleCount.arbres + visibleCount.dechets + visibleCount.pollution + visibleCount.signalements + visibleCount.biodiversite + visibleCount.deforestation + visibleCount.mine + visibleCount.pollution_eau + visibleCount.assechement + visibleCount.deversement;
+  const COUCHES_SIGNALEMENT = ["signalements", "dechets", "pollution", "deforestation", "mine", "pollution_eau", "assechement", "deversement"];
+  const aucuneCoucheActive = !layersOn.arbres && !layersOn.biodiversite && COUCHES_SIGNALEMENT.every(c => !layersOn[c]);
 
   const LAYER_DEFS = [
     { id: "arbres", label: "Arbres", labelKey: "layer_arbres", icon: IconTree, color: "var(--c-accent)" },
-    { id: "signalements", label: "Signalements (autres)", labelKey: "layer_signalements", icon: IconAlert, color: "#B5451B" },
-    { id: "dechets", label: "Déchets", labelKey: "layer_dechets", icon: IconTrash, color: "#8A6318" },
-    { id: "pollution", label: "Pollution", labelKey: "layer_pollution", icon: IconDroplet, color: "#2E6B8A" },
+    { id: "deforestation", label: "Déforestation", labelKey: "layer_deforestation", icon: IconTree, color: "#8A6318" },
+    { id: "mine", label: "Exploitation minière", labelKey: "layer_mine", icon: IconPick, color: "#7A1F1F" },
+    { id: "pollution", label: "Pollution", labelKey: "layer_pollution", icon: IconWind, color: "#6B7A8F" },
+    { id: "dechets", label: "Déchets et décharges", labelKey: "layer_dechets", icon: IconTrash, color: "#8A6318" },
+    { id: "pollution_eau", label: "Pollution des cours d'eau", labelKey: "layer_pollution_eau", icon: IconDroplet, color: "#2E6B8A" },
+    { id: "assechement", label: "Assèchement des points d'eau", labelKey: "layer_assechement", icon: IconSun, color: "#E3A73B" },
+    { id: "deversement", label: "Déversements polluants", labelKey: "layer_deversement", icon: IconAlert, color: "#B5451B" },
+    { id: "signalements", label: "Autres atteintes environnementales", labelKey: "layer_signalements", icon: IconGlobe, color: "#6B7A8F" },
     { id: "biodiversite", label: "Biodiversité", labelKey: "layer_biodiversite", icon: IconSprout, color: "var(--c-sky)" },
   ];
 
@@ -4374,6 +4426,11 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
             <div style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 10, height: 10, borderRadius: "50%", background: "var(--c-sky)", display: "inline-block" }}></span> {t(lang, "legend_toi")}</div>
             <div style={{ display: "flex", alignItems: "center", gap: 4 }}><IconMapPin size={13} color="var(--c-warning)" /> {t(lang, "type_zone")}</div>
             <div style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 14, height: 2, background: "var(--c-sky)", display: "inline-block" }}></span> {t(lang, "parcours_btn")}</div>
+            {["benevole", "ong", "administration"].map(o => (
+              <div key={o} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <span style={{ width: 10, height: 10, borderRadius: "50% 50% 50% 0", background: "#fff", border: `2px solid ${ORIGINE_COULEURS[o]}`, transform: "rotate(-45deg)", display: "inline-block" }}></span> {ORIGINE_LABELS[o]}
+              </div>
+            ))}
           </div>
 
           <div style={{ fontFamily: "Fraunces, serif", fontSize: 14.5, fontWeight: 600, color: "var(--c-accent-dark)", marginTop: 18, marginBottom: 10 }}>{t(lang, "tableau_bord_zone")}</div>
