@@ -3201,10 +3201,42 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
   const [compareAnnee1, setCompareAnnee1] = useState(SENTINEL2_MOSAIC_YEARS[0]);
   const [compareAnnee2, setCompareAnnee2] = useState(SENTINEL2_MOSAIC_YEARS[SENTINEL2_MOSAIC_YEARS.length - 1]);
   const [compareSwipePos, setCompareSwipePos] = useState(50); // % depuis la gauche de la carte
-  const [compareTuileErreur, setCompareTuileErreur] = useState(false);
+  const [compareErreurAvant, setCompareErreurAvant] = useState(false);
+  const [compareErreurApres, setCompareErreurApres] = useState(false);
   const coucheCompareAvantRef = useRef(null);
   const coucheCompareApresRef = useRef(null);
   const compareDraggingRef = useRef(false);
+  // Les identifiants de mosaïques annuelles réellement publiées par EOX peuvent différer
+  // d'une année à l'autre (le service évolue). Plutôt que de deviner une liste fixe — au
+  // risque de proposer une année inexistante, dont les tuiles échoueraient en silence —
+  // on interroge le GetCapabilities WMTS au chargement pour n'afficher que les années
+  // dont la mosaïque existe vraiment. Repli sur la liste par défaut si la vérification
+  // échoue (réseau, CORS...), avec un avertissement explicite dans le panneau.
+  // null = vérification en cours, false = vérification impossible (repli), array = confirmé.
+  const [anneesSentinelVerifiees, setAnneesSentinelVerifiees] = useState(null);
+  useEffect(() => {
+    let annule = false;
+    fetch("https://tiles.maps.eox.at/wmts/1.0.0/WMTSCapabilities.xml")
+      .then(r => { if (!r.ok) throw new Error("capacites indisponibles"); return r.text(); })
+      .then(xmlText => {
+        if (annule) return;
+        const doc = new DOMParser().parseFromString(xmlText, "text/xml");
+        const identifiants = Array.from(doc.getElementsByTagName("ows:Identifier")).map(n => n.textContent || "");
+        const annees = identifiants
+          .map(id => { const m = /^s2cloudless-(\d{4})_3857$/.exec(id); return m ? Number(m[1]) : null; })
+          .filter(Boolean)
+          .sort((a, b) => a - b);
+        setAnneesSentinelVerifiees(annees.length >= 2 ? annees : false);
+      })
+      .catch(() => { if (!annule) setAnneesSentinelVerifiees(false); });
+    return () => { annule = true; };
+  }, []);
+  const anneesSentinel = Array.isArray(anneesSentinelVerifiees) ? anneesSentinelVerifiees : SENTINEL2_MOSAIC_YEARS;
+  useEffect(() => {
+    if (!Array.isArray(anneesSentinelVerifiees)) return;
+    setCompareAnnee1(a => anneesSentinelVerifiees.includes(a) ? a : anneesSentinelVerifiees[0]);
+    setCompareAnnee2(a => anneesSentinelVerifiees.includes(a) ? a : anneesSentinelVerifiees[anneesSentinelVerifiees.length - 1]);
+  }, [anneesSentinelVerifiees]);
 
   // Couches — toutes désactivées par défaut, seul le fond de carte est actif.
   const [layersOn, setLayersOn] = useState({ arbres: true, signalements: true, dechets: true, pollution: true, biodiversite: true, deforestation: true, mine: true, pollution_eau: true, assechement: true, deversement: true });
@@ -3877,14 +3909,14 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
       const p = map.createPane("paneCompareApres");
       p.style.zIndex = 449; p.style.pointerEvents = "none";
     }
-    setCompareTuileErreur(false);
-    const onErreurTuile = () => setCompareTuileErreur(true);
+    setCompareErreurAvant(false);
+    setCompareErreurApres(false);
     coucheCompareAvantRef.current = L.tileLayer(urlMosaiqueSentinel2(compareAnnee1), {
       pane: "paneCompareAvant", maxZoom: 19, attribution: SENTINEL2_ATTRIBUTION,
-    }).on("tileerror", onErreurTuile).addTo(map);
+    }).on("tileerror", () => setCompareErreurAvant(true)).addTo(map);
     coucheCompareApresRef.current = L.tileLayer(urlMosaiqueSentinel2(compareAnnee2), {
       pane: "paneCompareApres", maxZoom: 19, attribution: SENTINEL2_ATTRIBUTION,
-    }).on("tileerror", onErreurTuile).addTo(map);
+    }).on("tileerror", () => setCompareErreurApres(true)).addTo(map);
     const paneApres = map.getPane("paneCompareApres");
     if (paneApres) paneApres.style.clipPath = `inset(0 0 0 ${compareSwipePos}%)`;
     return () => {
@@ -4336,16 +4368,24 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
             <div style={{ flex: 1 }}>
               <label style={{ fontSize: 10.5, color: "var(--c-text-muted)", display: "block", marginBottom: 4 }}>Avant</label>
               <select value={compareAnnee1} onChange={e => setCompareAnnee1(Number(e.target.value))} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--c-border)", fontSize: 12.5, background: "var(--c-bg)", color: "var(--c-text)" }}>
-                {SENTINEL2_MOSAIC_YEARS.map(a => <option key={a} value={a}>{a}</option>)}
+                {anneesSentinel.map(a => <option key={a} value={a}>{a}</option>)}
               </select>
             </div>
             <div style={{ flex: 1 }}>
               <label style={{ fontSize: 10.5, color: "var(--c-text-muted)", display: "block", marginBottom: 4 }}>Après</label>
               <select value={compareAnnee2} onChange={e => setCompareAnnee2(Number(e.target.value))} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--c-border)", fontSize: 12.5, background: "var(--c-bg)", color: "var(--c-text)" }}>
-                {SENTINEL2_MOSAIC_YEARS.map(a => <option key={a} value={a}>{a}</option>)}
+                {anneesSentinel.map(a => <option key={a} value={a}>{a}</option>)}
               </select>
             </div>
           </div>
+          {anneesSentinelVerifiees === null && (
+            <div style={{ fontSize: 10, color: "var(--c-text-muted)", marginBottom: 8 }}>Vérification des mosaïques réellement disponibles…</div>
+          )}
+          {anneesSentinelVerifiees === false && (
+            <div style={{ fontSize: 10, color: "var(--c-warning)", marginBottom: 8, lineHeight: 1.4 }}>
+              Liste d'années non confirmée par le service (vérification injoignable) : si une année choisie n'existe pas réellement, ce côté restera vide — essayez-en une autre le cas échéant.
+            </div>
+          )}
           <button onClick={() => { setCompareActif(v => !v); setCompareSwipePos(50); }} style={{ width: "100%", padding: "9px 0", borderRadius: 8, border: "none", background: compareActif ? "var(--c-warning)" : "var(--c-accent-dark)", color: "#fff", fontSize: 12.5, fontWeight: 600, cursor: "pointer", marginBottom: 8 }}>
             {compareActif ? "Désactiver la comparaison" : "Activer la comparaison"}
           </button>
@@ -4550,9 +4590,13 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
             <div style={{ position: "absolute", top: fullscreen ? 16 : 10, right: fullscreen ? 66 : 56, background: "rgba(20,20,20,0.72)", color: "#fff", borderRadius: 8, padding: "5px 9px", fontSize: 10.5, fontWeight: 600, zIndex: 10000 }}>
               {compareAnnee2}
             </div>
-            <div style={{ position: "absolute", bottom: fullscreen ? 16 : 10, left: fullscreen ? 16 : 10, right: fullscreen ? 16 : 10, background: "rgba(20,20,20,0.72)", color: "#fff", borderRadius: 8, padding: "5px 10px", fontSize: 9.5, fontWeight: 600, zIndex: 10000, textAlign: "center" }}>
-              {compareTuileErreur
-                ? "Service Sentinel-2 (EOX) momentanément indisponible pour cette zone."
+            <div style={{ position: "absolute", bottom: fullscreen ? 16 : 10, left: fullscreen ? 16 : 10, right: fullscreen ? 16 : 10, background: (compareErreurAvant || compareErreurApres) ? "#B5451B" : "rgba(20,20,20,0.72)", color: "#fff", borderRadius: 8, padding: "5px 10px", fontSize: 9.5, fontWeight: 600, zIndex: 10000, textAlign: "center" }}>
+              {compareErreurAvant && compareErreurApres
+                ? `Aucune des deux mosaïques (${compareAnnee1} et ${compareAnnee2}) n'a pu être chargée — vérifiez la connexion ou essayez d'autres années.`
+                : compareErreurAvant
+                ? `La mosaïque ${compareAnnee1} (avant) n'a pas pu être chargée pour cette zone — essayez une autre année.`
+                : compareErreurApres
+                ? `La mosaïque ${compareAnnee2} (après) n'a pas pu être chargée pour cette zone — essayez une autre année.`
                 : `Sentinel-2 cloudless (EOX/Copernicus) — glissez pour comparer ${compareAnnee1} et ${compareAnnee2}`}
             </div>
           </>
