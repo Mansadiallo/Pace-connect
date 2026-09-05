@@ -3945,9 +3945,20 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
     }).on("tileerror", () => setCompareErreurApres(true)).addTo(map);
     const paneApres = map.getPane("paneCompareApres");
     if (paneApres) paneApres.style.clipPath = `inset(0 0 0 ${compareSwipePos}%)`;
+    // Le glissement avant/après porte sur toute l'image, pas sur la carte : on suspend le
+    // déplacement et le zoom de la carte le temps de la comparaison (réactivés à la sortie),
+    // pour que le geste de glissement ne soit jamais intercepté par le panoramique de fond.
+    map.dragging.disable();
+    map.scrollWheelZoom.disable();
+    map.doubleClickZoom.disable();
+    map.boxZoom.disable();
     return () => {
       if (coucheCompareAvantRef.current) { map.removeLayer(coucheCompareAvantRef.current); coucheCompareAvantRef.current = null; }
       if (coucheCompareApresRef.current) { map.removeLayer(coucheCompareApresRef.current); coucheCompareApresRef.current = null; }
+      map.dragging.enable();
+      map.scrollWheelZoom.enable();
+      map.doubleClickZoom.enable();
+      map.boxZoom.enable();
     };
   }, [compareActif, compareAnnee1, compareAnnee2]);
 
@@ -4417,7 +4428,7 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
         <div style={{ background: "var(--c-surface)", border: "1px solid var(--c-border)", borderRadius: 14, padding: 12, marginBottom: 10 }}>
           <div style={{ fontSize: 11, fontWeight: 600, color: "var(--c-text-secondary)", marginBottom: 8 }}>Comparaison satellite temporelle (Sentinel-2)</div>
           <div style={{ fontSize: 10.5, color: "var(--c-text-muted)", marginBottom: 10, lineHeight: 1.5 }}>
-            Compare deux mosaïques annuelles Sentinel-2 (Copernicus) sur la zone actuellement affichée — déplacez ou zoomez la carte pour changer de zone. Fonctionne indépendamment du fond satellite Esri.
+            Compare deux mosaïques annuelles Sentinel-2 (Copernicus) sur la zone actuellement affichée — déplacez ou zoomez la carte <b>avant</b> d'activer la comparaison pour choisir la zone, car le déplacement/zoom de la carte est momentanément suspendu pendant que la comparaison est active (le glissement sur l'image sert alors à comparer, pas à déplacer la carte). Fonctionne indépendamment du fond satellite Esri.
           </div>
           <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
             <div style={{ flex: 1 }}>
@@ -4623,7 +4634,14 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
         {compareActif && (
           <>
             <div
-              onPointerDown={(e) => { compareDraggingRef.current = true; e.currentTarget.setPointerCapture(e.pointerId); }}
+              onPointerDown={(e) => {
+                compareDraggingRef.current = true;
+                e.currentTarget.setPointerCapture(e.pointerId);
+                if (!mapElRef.current) return;
+                const rect = mapElRef.current.getBoundingClientRect();
+                const pct = Math.min(100, Math.max(0, ((e.clientX - rect.left) / rect.width) * 100));
+                setCompareSwipePos(pct);
+              }}
               onPointerUp={() => { compareDraggingRef.current = false; }}
               onPointerCancel={() => { compareDraggingRef.current = false; }}
               onPointerMove={(e) => {
@@ -4632,12 +4650,12 @@ function Carte({ signalements, arbres, observations, onAddSignalement, onAddArbr
                 const pct = Math.min(100, Math.max(0, ((e.clientX - rect.left) / rect.width) * 100));
                 setCompareSwipePos(pct);
               }}
-              style={{ position: "absolute", top: 0, bottom: 0, left: `calc(${compareSwipePos}% - 15px)`, width: 30, zIndex: 10001, cursor: "ew-resize", touchAction: "none", display: "flex", alignItems: "center", justifyContent: "center" }}
-            >
-              <div style={{ position: "absolute", top: 0, bottom: 0, left: "50%", width: 3, transform: "translateX(-50%)", background: "#fff", boxShadow: "0 0 5px rgba(0,0,0,0.6)" }} />
-              <div style={{ width: 30, height: 30, borderRadius: "50%", background: "#fff", boxShadow: "0 2px 6px rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                <IconTrendingUp size={14} color="var(--c-accent-dark)" />
-              </div>
+              style={{ position: "absolute", inset: 0, zIndex: 9000, cursor: "ew-resize", touchAction: "none" }}
+              title="Glissez n'importe où sur l'image pour comparer"
+            />
+            <div style={{ position: "absolute", top: 0, bottom: 0, left: `calc(${compareSwipePos}% - 1.5px)`, width: 3, background: "#fff", boxShadow: "0 0 5px rgba(0,0,0,0.6)", zIndex: 9001, pointerEvents: "none" }} />
+            <div style={{ position: "absolute", top: "50%", left: `${compareSwipePos}%`, transform: "translate(-50%, -50%)", width: 34, height: 34, borderRadius: "50%", background: "#fff", boxShadow: "0 2px 6px rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9001, pointerEvents: "none" }}>
+              <IconTrendingUp size={15} color="var(--c-accent-dark)" />
             </div>
             <div style={{ position: "absolute", top: fullscreen ? 16 : 10, left: fullscreen ? 16 : 10, background: "rgba(20,20,20,0.72)", color: "#fff", borderRadius: 8, padding: "5px 9px", fontSize: 10.5, fontWeight: 600, zIndex: 10000 }}>
               {compareAnnee1}
